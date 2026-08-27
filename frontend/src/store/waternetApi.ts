@@ -1,8 +1,6 @@
 import { createApi, fetchBaseQuery } from '@reduxjs/toolkit/query/react'
 import type { BaseQueryFn, FetchArgs, FetchBaseQueryError } from '@reduxjs/toolkit/query'
-import { clearAuthSession } from '@/lib/api'
-
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://127.0.0.1:8000/api'
+import { API_BASE_URL, clearAuthSession } from '@/lib/api'
 
 export type Role = { id: number; name: string; permissions?: Permission[] }
 export type Permission = { id: number; name: string }

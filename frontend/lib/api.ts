@@ -1,6 +1,17 @@
 'use client'
 
-export const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://127.0.0.1:8000/api'
+function resolveApiBaseUrl() {
+  const configuredUrl =
+    process.env.NEXT_PUBLIC_API_URL ??
+    process.env.NEXT_PUBLIC_API_BASE_URL ??
+    'http://127.0.0.1:8000/api'
+
+  const normalizedUrl = configuredUrl.replace(/\/+$/, '')
+
+  return normalizedUrl.endsWith('/api') ? normalizedUrl : `${normalizedUrl}/api`
+}
+
+export const API_BASE_URL = resolveApiBaseUrl()
 const authSessionChangeEvent = 'wsmis-auth-session-change'
 
 type RequestOptions = Omit<RequestInit, 'body'> & {
