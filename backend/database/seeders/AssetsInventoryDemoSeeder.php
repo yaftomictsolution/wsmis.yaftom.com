@@ -42,6 +42,10 @@ class AssetsInventoryDemoSeeder extends Seeder
             ['code' => 'cash'],
             ['name' => 'Cash', 'status' => 'active'],
         );
+        $bankMethod = PaymentMethod::query()->updateOrCreate(
+            ['code' => 'bank_transfer'],
+            ['name' => 'Bank Transfer', 'status' => 'active'],
+        );
         $mainWarehouse = $this->warehouse('WH-MAIN', 'Main Warehouse', $area?->id);
         $fieldWarehouse = $this->warehouse('WH-FIELD', 'Field Warehouse', $area?->id);
         $pipeSupplier = $this->supplier('Kabul Pipe Supplies', 'pipe');
@@ -53,6 +57,8 @@ class AssetsInventoryDemoSeeder extends Seeder
             'type' => 'purchase',
             'supplier_id' => $pipeSupplier->id,
             'accounting_account_id' => $cash->id,
+            'payment_method_id' => $cashMethod->id,
+            'amount_paid' => 1000,
             'warehouse_id' => $mainWarehouse->id,
             'request_date' => now()->toDateString(),
             'items' => [[
@@ -65,6 +71,8 @@ class AssetsInventoryDemoSeeder extends Seeder
             'type' => 'purchase',
             'supplier_id' => $meterSupplier->id,
             'accounting_account_id' => $bank->id,
+            'payment_method_id' => $bankMethod->id,
+            'amount_paid' => 1200,
             'warehouse_id' => $fieldWarehouse->id,
             'request_date' => now()->toDateString(),
             'items' => [[

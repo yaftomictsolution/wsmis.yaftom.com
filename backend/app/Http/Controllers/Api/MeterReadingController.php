@@ -26,7 +26,7 @@ class MeterReadingController extends Controller
                 'meter:id,meter_number',
                 'meterAssignment:id,customer_id,meter_id',
                 'reader:id,name',
-                'invoice:id,meter_reading_id,invoice_number,total_amount,paid_amount,remaining_amount,status',
+                'invoice:id,meter_reading_id,invoice_number,total_amount,paid_amount,payment_discount_amount,remaining_amount,status',
             ])->latest()->get(),
         ]);
     }
@@ -124,7 +124,7 @@ class MeterReadingController extends Controller
                 'exists:meter_assignments,id',
                 Rule::unique('meter_readings', 'meter_assignment_id')->where(fn ($query) => $query->where('billing_period_id', $request->integer('billing_period_id'))),
             ],
-            'reading_date' => ['required', 'date'],
+            'reading_date' => ['required', 'date', 'before_or_equal:today'],
             'current_reading' => ['required', 'numeric', 'min:0'],
             'due_date' => ['nullable', 'date', 'after_or_equal:reading_date'],
             'status' => ['nullable', Rule::in(['recorded', 'reviewed'])],

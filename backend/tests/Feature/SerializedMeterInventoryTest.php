@@ -4,9 +4,11 @@ namespace Tests\Feature;
 
 use App\Models\AccountingAccount;
 use App\Models\Customer;
+use App\Models\Employee;
 use App\Models\Good;
 use App\Models\InventoryItem;
 use App\Models\Meter;
+use App\Models\PaymentMethod;
 use App\Models\ServiceArea;
 use App\Models\Supplier;
 use App\Models\User;
@@ -24,6 +26,18 @@ class SerializedMeterInventoryTest extends TestCase
     {
         $this->seed(FoundationSeeder::class);
         $admin = User::query()->where('email', 'admin@waternet.local')->firstOrFail();
+        $admin->assignRole('Meter Assigner');
+        $meterAssigner = Employee::query()->create([
+            'user_id' => $admin->id,
+            'employee_number' => 'EMP-SERIAL-ASSIGNER',
+            'first_name' => $admin->name,
+            'email' => $admin->email,
+            'hire_date' => '2026-01-01',
+            'employment_type' => 'permanent',
+            'salary_type' => 'fixed',
+            'base_salary' => 10000,
+            'status' => 'active',
+        ]);
         $area = ServiceArea::query()->where('status', 'active')->firstOrFail();
         $warehouse = Warehouse::query()->create([
             'name' => 'Serialized Meter Warehouse',
@@ -52,12 +66,15 @@ class SerializedMeterInventoryTest extends TestCase
             'current_balance' => 10000,
             'status' => 'active',
         ]);
+        $paymentMethod = PaymentMethod::query()->where('code', 'bank_transfer')->firstOrFail();
 
         Sanctum::actingAs($admin);
         $purchaseId = $this->postJson('/api/inventory-requests', [
             'type' => 'purchase',
             'supplier_id' => $supplier->id,
             'accounting_account_id' => $account->id,
+            'payment_method_id' => $paymentMethod->id,
+            'amount_paid' => 1500,
             'warehouse_id' => $warehouse->id,
             'request_date' => '2026-07-28',
             'items' => [[
@@ -106,6 +123,7 @@ class SerializedMeterInventoryTest extends TestCase
             'customer_contract_id' => $contractId,
             'source_warehouse_id' => $warehouse->id,
             'meter_id' => $meter->id,
+            'meter_assigner_id' => $meterAssigner->id,
             'initial_reading' => 0,
             'installation_date' => '2026-07-28',
             'seal_number' => 'SEAL-SERIAL-0001',

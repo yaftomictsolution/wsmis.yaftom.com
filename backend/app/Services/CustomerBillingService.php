@@ -141,7 +141,8 @@ class CustomerBillingService
             return $existing->load(['items.category', 'customer', 'contract']);
         }
 
-        $issueDate ??= optional($contract->confirmed_at)->toDateString()
+        $issueDate ??= optional($contract->subscription_date)->toDateString()
+            ?? optional($contract->confirmed_at)->toDateString()
             ?? optional($contract->approved_at)->toDateString()
             ?? now()->toDateString();
         $invoice = Invoice::query()->create([
@@ -212,11 +213,20 @@ class CustomerBillingService
             ->selectRaw('COALESCE(SUM(amount - refunded_amount), 0) as total')
             ->value('total'), 2);
         $paid = min((float) $invoice->total_amount, max(0, $paid));
-        $remaining = round(max(0, (float) $invoice->total_amount - $paid), 2);
+        $paymentDiscount = round((float) $invoice->allocations()
+            ->whereHas('payment', fn ($query) => $query->where('status', 'posted'))
+            ->selectRaw('COALESCE(SUM(CASE WHEN amount > 0 AND refunded_amount + 0.005 >= amount THEN 0 ELSE discount_amount END), 0) as total')
+            ->value('total'), 2);
+        $paymentDiscount = min(
+            max(0, (float) $invoice->total_amount - $paid),
+            max(0, $paymentDiscount),
+        );
+        $remaining = round(max(0, (float) $invoice->total_amount - $paid - $paymentDiscount), 2);
         $invoice->update([
             'paid_amount' => $paid,
+            'payment_discount_amount' => $paymentDiscount,
             'remaining_amount' => $remaining,
-            'status' => $remaining <= 0.005 ? 'paid' : ($paid > 0.005 ? 'partially_paid' : 'unpaid'),
+            'status' => $remaining <= 0.005 ? 'paid' : (($paid + $paymentDiscount) > 0.005 ? 'partially_paid' : 'unpaid'),
         ]);
 
         $unappliedPaid = $paid;

@@ -8,6 +8,7 @@ use App\Models\Asset;
 use App\Models\AssetPurchase;
 use App\Models\EmployeeTermination;
 use App\Models\FinancialPeriodClosing;
+use App\Models\InventoryPurchasePayment;
 use App\Models\PaymentMethod;
 use App\Models\PayrollRun;
 use App\Models\SalaryAdvance;
@@ -157,6 +158,7 @@ class AccountingWorkflowService
     {
         match ($transaction->source_type) {
             'asset_purchase' => $this->synchronizeAssetPurchase($transaction, $event),
+            'inventory_purchase_payment' => $this->synchronizeInventoryPurchasePayment($transaction, $event),
             'supplier_installment' => $this->synchronizeSupplierInstallment($transaction, $event),
             'payroll_run' => $this->synchronizePayroll($transaction, $event),
             'salary_advance' => $this->synchronizeSalaryAdvance($transaction, $event),
@@ -164,6 +166,22 @@ class AccountingWorkflowService
             'shareholder_payment' => $this->synchronizeShareholderPayment($transaction, $event),
             default => null,
         };
+    }
+
+    private function synchronizeInventoryPurchasePayment(AccountingTransaction $transaction, string $event): void
+    {
+        $payment = InventoryPurchasePayment::query()
+            ->whereKey($transaction->source_id)
+            ->lockForUpdate()
+            ->first();
+        if (! $payment) {
+            return;
+        }
+
+        if ($event === 'cancelled') {
+            $payment->update(['status' => 'cancelled']);
+            $payment->purchase?->refreshPurchasePaymentStatus();
+        }
     }
 
     private function synchronizeAssetPurchase(AccountingTransaction $transaction, string $event): void

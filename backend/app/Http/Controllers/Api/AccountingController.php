@@ -62,7 +62,10 @@ class AccountingController extends Controller
             ->withMax(['transactions as last_transaction_at' => fn ($query) => $query->where('status', 'approved')], 'transaction_date')
             ->orderBy('type')->orderBy('name')->get();
 
-        return response()->json(['data' => $accounts]);
+        return response()
+            ->json(['data' => $accounts])
+            ->header('Cache-Control', 'no-store, no-cache, must-revalidate, private')
+            ->header('Pragma', 'no-cache');
     }
 
     public function storeAccount(Request $request): JsonResponse
@@ -322,7 +325,7 @@ class AccountingController extends Controller
             'amount' => ['required', 'numeric', 'min:0.01'],
             'received_from' => ['nullable', 'string', 'max:255'],
             'paid_to' => ['nullable', 'string', 'max:255'],
-            'transaction_date' => ['required', 'date'],
+            'transaction_date' => ['required', 'date', 'before_or_equal:today'],
             'receipt_number' => ['nullable', 'string', 'max:255'],
             'reference' => ['nullable', 'string', 'max:255'],
             'description' => ['nullable', 'string'],

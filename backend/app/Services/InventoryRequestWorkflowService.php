@@ -4,9 +4,12 @@ namespace App\Services;
 
 use App\Models\AccountingAccount;
 use App\Models\AccountingTransaction;
+use App\Models\Customer;
+use App\Models\CustomerContract;
 use App\Models\FinancialCategory;
 use App\Models\Good;
 use App\Models\InventoryItem;
+use App\Models\InventoryPurchasePayment;
 use App\Models\InventoryRequest;
 use App\Models\InventoryRequestItem;
 use App\Models\InventoryTransaction;
@@ -31,9 +34,28 @@ class InventoryRequestWorkflowService
         return DB::transaction(function () use ($data, $user): InventoryRequest {
             $type = $data['type'];
             $issueType = $type === 'issue' ? $data['issue_type'] : null;
+            $issuePurpose = $issueType === 'customer'
+                ? ($data['issue_purpose'] ?? 'separate_sale')
+                : null;
+            $customerContractId = null;
             $totalAmount = 0.0;
             $totalItems = 0.0;
             $lines = [];
+
+            if ($issuePurpose === 'contract_material') {
+                $contract = CustomerContract::query()
+                    ->whereKey($data['customer_contract_id'] ?? null)
+                    ->where('customer_id', $data['customer_id'] ?? null)
+                    ->whereIn('status', ['installation_pending', 'active'])
+                    ->lockForUpdate()
+                    ->first();
+                if (! $contract || $contract->cancellationRequests()->where('status', 'pending')->exists()) {
+                    throw ValidationException::withMessages([
+                        'customer_contract_id' => ['Select the customer current contract. A contract awaiting cancellation cannot receive more materials.'],
+                    ]);
+                }
+                $customerContractId = $contract->id;
+            }
 
             if ($type === 'purchase') {
                 $goods = Good::query()
@@ -84,6 +106,11 @@ class InventoryRequestWorkflowService
                             "items.{$index}.inventory_item_id" => ['The selected item is not available in this warehouse.'],
                         ]);
                     }
+                    if ($issuePurpose === 'contract_material' && $stockItem->category === 'meter') {
+                        throw ValidationException::withMessages([
+                            "items.{$index}.inventory_item_id" => ['Install water meters from Meter Assignments. Do not issue them as contract material.'],
+                        ]);
+                    }
 
                     $quantity = round((float) $line['quantity'], 2);
                     if ((float) $stockItem->quantity + 0.0001 < $quantity) {
@@ -114,18 +141,18 @@ class InventoryRequestWorkflowService
                 }
             }
 
-            $initialPaymentAmount = $issueType === 'customer'
+            $initialPaymentAmount = ($type === 'purchase' || $issueType === 'customer')
                 ? round((float) ($data['amount_paid'] ?? 0), 2)
                 : 0.0;
             if ($initialPaymentAmount > round($totalAmount, 2) + 0.005) {
                 throw ValidationException::withMessages([
-                    'amount_paid' => ['Amount paid cannot be greater than the sale total.'],
+                    'amount_paid' => ['Amount paid cannot be greater than the document total.'],
                 ]);
             }
             if ($initialPaymentAmount > 0.005) {
                 if (empty($data['payment_method_id']) || empty($data['accounting_account_id'])) {
                     throw ValidationException::withMessages([
-                        'amount_paid' => ['Select a payment method and receiving account when an amount is paid.'],
+                        'amount_paid' => ['Select a payment method and account when an amount is paid.'],
                     ]);
                 }
                 $this->accounting->ensureDateIsOpen($data['request_date']);
@@ -139,11 +166,14 @@ class InventoryRequestWorkflowService
                 'request_number' => InventoryRequest::nextNumber($type),
                 'type' => $type,
                 'issue_type' => $issueType,
+                'issue_purpose' => $issuePurpose,
                 'status' => 'pending',
+                'return_status' => $issuePurpose === 'contract_material' ? 'not_requested' : 'not_required',
                 'supplier_id' => $type === 'purchase' ? $data['supplier_id'] : null,
                 'customer_id' => $issueType === 'customer' ? $data['customer_id'] : null,
+                'customer_contract_id' => $customerContractId,
                 'department_id' => $issueType === 'internal' ? $data['department_id'] : null,
-                'accounting_account_id' => $type === 'purchase' || $initialPaymentAmount > 0.005
+                'accounting_account_id' => $initialPaymentAmount > 0.005
                     ? ($data['accounting_account_id'] ?? null)
                     : null,
                 'payment_method_id' => $initialPaymentAmount > 0.005
@@ -154,6 +184,9 @@ class InventoryRequestWorkflowService
                 'notes' => $data['notes'] ?? null,
                 'total_amount' => round($totalAmount, 2),
                 'initial_payment_amount' => $initialPaymentAmount,
+                'paid_amount' => 0,
+                'remaining_amount' => round($totalAmount, 2),
+                'payment_status' => 'unpaid',
                 'total_items' => round($totalItems, 2),
                 'requested_by' => $user->id,
             ]);
@@ -190,10 +223,17 @@ class InventoryRequestWorkflowService
             }
 
             $locked->load($this->relations());
+            $documentNumber = null;
             if ($locked->type === 'purchase') {
                 $this->processPurchase($locked, $actor);
+                $documentNumber = $locked->purchaseBillNumber();
             } else {
                 $this->processIssue($locked, $actor);
+                if ($locked->issue_type === 'customer' || $locked->customer_id) {
+                    $documentNumber = Invoice::query()
+                        ->whereKey($locked->invoice_id)
+                        ->value('invoice_number');
+                }
             }
 
             $locked->update([
@@ -201,7 +241,43 @@ class InventoryRequestWorkflowService
                 'approved_by' => $actor->id,
                 'approved_at' => now(),
                 'approval_notes' => $data['approval_notes'] ?? null,
+                'document_number' => $documentNumber,
+                'document_generated_at' => $documentNumber ? now() : null,
             ]);
+
+            return $locked->fresh()->load($this->relations());
+        });
+    }
+
+    public function recordPurchasePayment(InventoryRequest $inventoryRequest, array $data, User $actor): InventoryRequest
+    {
+        return DB::transaction(function () use ($inventoryRequest, $data, $actor): InventoryRequest {
+            $locked = InventoryRequest::query()
+                ->whereKey($inventoryRequest->id)
+                ->lockForUpdate()
+                ->firstOrFail();
+
+            if ($locked->type !== 'purchase') {
+                throw ValidationException::withMessages([
+                    'inventory_request_id' => ['Supplier payments can only be recorded against purchase records.'],
+                ]);
+            }
+            if ($locked->status !== 'approved') {
+                throw ValidationException::withMessages([
+                    'inventory_request_id' => ['Approve the purchase before recording another supplier payment.'],
+                ]);
+            }
+
+            $this->postPurchasePayment(
+                $locked,
+                round((float) $data['amount'], 2),
+                (int) $data['payment_method_id'],
+                (int) $data['accounting_account_id'],
+                $data['paid_at'],
+                $actor,
+                $data['reference'] ?? null,
+                $data['notes'] ?? null,
+            );
 
             return $locked->fresh()->load($this->relations());
         });
@@ -216,13 +292,7 @@ class InventoryRequestWorkflowService
             ]);
         }
 
-        $account = $this->lockedActiveAccount($request);
         $totalAmount = round((float) $request->total_amount, 2);
-        if ((float) $account->current_balance + 0.005 < $totalAmount) {
-            throw ValidationException::withMessages([
-                'accounting_account_id' => ['The selected account does not have enough available balance for this purchase.'],
-            ]);
-        }
 
         foreach ($request->items as $line) {
             $good = Good::query()->find($line->good_id);
@@ -288,12 +358,85 @@ class InventoryRequestWorkflowService
             }
         }
 
+        $request->update([
+            'paid_amount' => 0,
+            'remaining_amount' => $totalAmount,
+            'payment_status' => 'unpaid',
+        ]);
+
+        $initialPayment = round((float) $request->initial_payment_amount, 2);
+        if ($initialPayment > 0.005) {
+            if (! $request->payment_method_id || ! $request->accounting_account_id) {
+                throw ValidationException::withMessages([
+                    'amount_paid' => ['Select a payment method and payment account for the paid amount.'],
+                ]);
+            }
+
+            $this->postPurchasePayment(
+                $request,
+                $initialPayment,
+                (int) $request->payment_method_id,
+                (int) $request->accounting_account_id,
+                $request->request_date->toDateString(),
+                $actor,
+                $request->request_number,
+                $request->notes,
+            );
+        }
+    }
+
+    private function postPurchasePayment(
+        InventoryRequest $request,
+        float $amount,
+        int $paymentMethodId,
+        int $accountId,
+        string $paidAt,
+        User $actor,
+        ?string $reference = null,
+        ?string $notes = null,
+    ): InventoryPurchasePayment {
+        $postedAmount = round((float) $request->purchasePayments()->where('status', 'posted')->sum('amount'), 2);
+        $remaining = max(0, round((float) $request->total_amount - $postedAmount, 2));
+
+        if ($amount <= 0.005) {
+            throw ValidationException::withMessages([
+                'amount' => ['Payment amount must be greater than zero.'],
+            ]);
+        }
+        if ($amount > $remaining + 0.005) {
+            throw ValidationException::withMessages([
+                'amount' => ["Payment cannot be greater than the remaining payable amount of AFN {$remaining}."],
+            ]);
+        }
+
+        $this->accounting->ensureDateIsOpen($paidAt);
+        $this->accounting->ensureCompatibleAccount($paymentMethodId, $accountId);
+        $account = AccountingAccount::query()->whereKey($accountId)->lockForUpdate()->firstOrFail();
+        if ((float) $account->current_balance + 0.005 < $amount) {
+            throw ValidationException::withMessages([
+                'accounting_account_id' => ['The selected account does not have enough available balance for this payment.'],
+            ]);
+        }
+
         $category = FinancialCategory::query()->firstOrCreate(
             ['code' => 'inventory_purchase'],
             ['name' => 'Inventory Purchase', 'type' => 'expense', 'status' => 'active']
         );
+        $payment = InventoryPurchasePayment::query()->create([
+            'inventory_request_id' => $request->id,
+            'accounting_account_id' => $account->id,
+            'payment_method_id' => $paymentMethodId,
+            'recorded_by' => $actor->id,
+            'receipt_number' => InventoryPurchasePayment::nextReceiptNumber(),
+            'amount' => $amount,
+            'paid_at' => $paidAt,
+            'reference' => $reference ?: $request->request_number,
+            'status' => 'posted',
+            'notes' => $notes,
+        ]);
         $transaction = AccountingTransaction::query()->create([
             'financial_category_id' => $category->id,
+            'payment_method_id' => $paymentMethodId,
             'accounting_account_id' => $account->id,
             'supplier_id' => $request->supplier_id,
             'recorded_by' => $actor->id,
@@ -301,18 +444,25 @@ class InventoryRequestWorkflowService
             'approved_by' => $actor->id,
             'transaction_number' => AccountingTransaction::nextNumber('expense'),
             'type' => 'expense',
-            'title' => 'Inventory Purchase - '.$request->request_number,
-            'amount' => $totalAmount,
+            'title' => 'Inventory Purchase Payment - '.$request->request_number,
+            'amount' => $amount,
             'paid_to' => $request->supplier?->name,
-            'transaction_date' => $request->request_date,
-            'source_type' => 'inventory_request',
-            'source_id' => $request->id,
+            'transaction_date' => $paidAt,
+            'receipt_number' => $payment->receipt_number,
+            'reference' => $reference ?: $request->request_number,
+            'source_type' => 'inventory_purchase_payment',
+            'source_id' => $payment->id,
             'status' => 'approved',
             'reviewed_at' => now(),
             'approved_at' => now(),
-            'description' => $request->notes,
+            'description' => $notes,
         ]);
         $transaction->postToAccount();
+        $payment->update(['accounting_transaction_id' => $transaction->id]);
+
+        $request->refreshPurchasePaymentStatus();
+
+        return $payment->fresh();
     }
 
     private function processIssue(InventoryRequest $request, User $actor): void
@@ -327,6 +477,35 @@ class InventoryRequestWorkflowService
         $issueType = $request->issue_type ?: ($request->customer_id ? 'customer' : 'internal');
         $totalCost = 0.0;
         $totalPrice = 0.0;
+
+        if ($issueType === 'customer') {
+            $customer = Customer::query()
+                ->whereKey($request->customer_id)
+                ->lockForUpdate()
+                ->first();
+
+            if (! $customer || ! $customer->canReceiveInventorySale()) {
+                throw ValidationException::withMessages([
+                    'customer_id' => ['Select a current customer. Inactive customers cannot receive goods.'],
+                ]);
+            }
+
+            $request->setRelation('customer', $customer);
+
+            if ($request->issue_purpose === 'contract_material') {
+                $contractIsCurrent = CustomerContract::query()
+                    ->whereKey($request->customer_contract_id)
+                    ->where('customer_id', $request->customer_id)
+                    ->whereIn('status', ['installation_pending', 'active'])
+                    ->whereDoesntHave('cancellationRequests', fn ($query) => $query->where('status', 'pending'))
+                    ->exists();
+                if (! $contractIsCurrent) {
+                    throw ValidationException::withMessages([
+                        'customer_contract_id' => ['The linked contract is no longer available for material issue.'],
+                    ]);
+                }
+            }
+        }
 
         foreach ($request->items as $line) {
             $stockItem = InventoryItem::query()
@@ -691,6 +870,9 @@ class InventoryRequestWorkflowService
             'department',
             'account',
             'paymentMethod',
+            'purchasePayments.account',
+            'purchasePayments.paymentMethod',
+            'purchasePayments.recorder',
             'invoice.items.category',
             'invoice.allocations.payment.paymentMethod',
             'invoice.allocations.payment.account',

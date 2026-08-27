@@ -229,7 +229,8 @@ class DemoDataAuditService
         $financial = $this->financialReports->report('2026-04-01', '2026-07-31');
         $this->assertClose($expectedReceivables, (float) $financial['summary']['receivables'], 'Financial report receivables');
 
-        $operational = $this->operationalReports->report('all', '2026-04-01', '2026-07-31');
+        $reportEnd = max('2026-07-31', now()->toDateString());
+        $operational = $this->operationalReports->report('all', '2026-04-01', $reportEnd);
         $this->assert(
             (int) $operational['summary']['total_customers'] === Customer::query()->count(),
             'Operational report customer total does not match the database.',

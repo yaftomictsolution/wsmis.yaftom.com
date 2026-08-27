@@ -15,7 +15,15 @@ class FinancialReportController extends Controller
 
     public function index(Request $request): JsonResponse
     {
-        abort_unless($request->user()?->hasAnyRole(['Accountant', 'Manager', 'Admin', 'Super Admin']), 403, 'You cannot view financial reports.');
+        $user = $request->user();
+
+        abort_unless(
+            $user?->hasAnyRole(['Accountant', 'Manager', 'Admin', 'Super Admin'])
+                || $user?->can('financial-reports.view'),
+            403,
+            'You cannot view financial reports.',
+        );
+
         $data = $request->validate([
             'from' => ['required', 'date'],
             'to' => ['required', 'date', 'after_or_equal:from'],

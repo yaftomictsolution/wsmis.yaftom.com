@@ -17,6 +17,7 @@ class InvoiceController extends Controller
                 'contract:id,contract_number,status',
                 'meterReading:id,current_reading,previous_reading,consumption',
                 'items.category:id,name,code,type',
+                'inventoryRequest:id,invoice_id,document_number',
             ])->latest()->get(),
         ]);
     }
@@ -34,6 +35,7 @@ class InvoiceController extends Controller
                 'payments.paymentMethod',
                 'payments.receiver:id,name',
                 'payments.account:id,name,code,type',
+                'inventoryRequest:id,invoice_id,document_number',
             ]),
         ]);
     }

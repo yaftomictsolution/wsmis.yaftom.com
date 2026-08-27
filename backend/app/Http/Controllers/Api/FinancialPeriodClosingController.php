@@ -14,14 +14,17 @@ use Illuminate\Validation\ValidationException;
 
 class FinancialPeriodClosingController extends Controller
 {
-    public function __construct(private readonly FinancialReportingService $reports)
-    {
-    }
+    public function __construct(private readonly FinancialReportingService $reports) {}
 
     public function index(Request $request): JsonResponse
     {
         $this->authorizePrepare($request);
-        return response()->json(['data' => FinancialPeriodClosing::with($this->relations())->latest('period_end')->get()]);
+        $closings = FinancialPeriodClosing::with($this->relations())
+            ->latest('period_end')
+            ->get()
+            ->each(fn (FinancialPeriodClosing $closing) => $this->attachReadiness($closing));
+
+        return response()->json(['data' => $closings]);
     }
 
     public function store(Request $request): JsonResponse
@@ -33,6 +36,7 @@ class FinancialPeriodClosingController extends Controller
             'notes' => ['nullable', 'string'],
         ]);
         [$start, $end, $code] = $this->validateMonth($data['period_start'], $data['period_end']);
+        $this->ensurePeriodEnded($end);
         abort_if(FinancialPeriodClosing::query()->where('period_code', $code)->exists(), 422, 'This month already has a closing record.');
 
         $snapshot = $this->reports->periodSnapshot($start, $end);
@@ -107,7 +111,7 @@ class FinancialPeriodClosingController extends Controller
                 'closed_by' => $request->user()->id,
                 'closed_at' => now(),
             ];
-            if (!$financialPeriodClosing->reviewed_by) {
+            if (! $financialPeriodClosing->reviewed_by) {
                 $updates += ['reviewed_by' => $request->user()->id, 'reviewed_at' => now()];
             }
             $financialPeriodClosing->update($updates);
@@ -169,24 +173,78 @@ class FinancialPeriodClosingController extends Controller
 
     private function ensureReadyToClose(FinancialPeriodClosing $closing): void
     {
+        $this->ensurePeriodEnded($closing->period_end->toDateString());
+        $readiness = $this->closingReadiness($closing);
+        if ($readiness['pending_transactions'] > 0) {
+            throw ValidationException::withMessages(['transactions' => ["Resolve {$readiness['pending_transactions']} pending financial transaction(s) before closing {$closing->period_code}."]]);
+        }
+        if (! $readiness['reconciliation']['complete']) {
+            $statusLabels = [
+                'missing' => 'not created',
+                'draft' => 'draft',
+                'pending_review' => 'awaiting review',
+                'pending_approval' => 'awaiting admin approval',
+                'rejected' => 'rejected',
+            ];
+            $blockers = collect($readiness['reconciliation']['accounts'])
+                ->reject(fn (array $account): bool => $account['status'] === 'approved')
+                ->map(fn (array $account): string => $account['name'].' ('.($statusLabels[$account['status']] ?? $account['status']).')')
+                ->join(', ');
+
+            throw ValidationException::withMessages([
+                'reconciliation' => ["Reconciliation is required for {$closing->period_code}: {$blockers}. Create, submit, and approve each record with period end {$closing->period_end->toDateString()} in Cash & Bank Reconciliation."],
+            ]);
+        }
+    }
+
+    private function attachReadiness(FinancialPeriodClosing $closing): FinancialPeriodClosing
+    {
+        $readiness = $this->closingReadiness($closing);
+        $closing->setAttribute('reconciliation_complete', $readiness['reconciliation']['complete']);
+        $closing->setAttribute('readiness', $readiness);
+
+        return $closing;
+    }
+
+    private function closingReadiness(FinancialPeriodClosing $closing): array
+    {
+        $start = $closing->period_start->toDateString();
+        $end = $closing->period_end->toDateString();
         $pending = AccountingTransaction::query()
-            ->whereDate('transaction_date', '>=', $closing->period_start->toDateString())
-            ->whereDate('transaction_date', '<=', $closing->period_end->toDateString())
+            ->whereDate('transaction_date', '>=', $start)
+            ->whereDate('transaction_date', '<=', $end)
             ->whereIn('status', ['pending_review', 'pending_approval'])
             ->count();
-        if ($pending > 0) {
-            throw ValidationException::withMessages(['transactions' => ["Resolve {$pending} pending financial transaction(s) before closing this month."]]);
+        $reconciliation = $this->reports->reconciliationReadiness($end);
+        $periodEnded = Carbon::parse($end)->isBefore(Carbon::today());
+
+        return [
+            'period_ended' => $periodEnded,
+            'available_after' => Carbon::parse($end)->addDay()->toDateString(),
+            'pending_transactions' => $pending,
+            'reconciliation' => $reconciliation,
+            'can_close' => $periodEnded && $pending === 0 && $reconciliation['complete'],
+        ];
+    }
+
+    private function ensurePeriodEnded(string $end): void
+    {
+        $periodEnd = Carbon::parse($end);
+        if ($periodEnd->isBefore(Carbon::today())) {
+            return;
         }
-        if (!$closing->reconciliation_complete) {
-            throw ValidationException::withMessages(['reconciliation' => ['Complete and approve reconciliation for every active account used through this month.']]);
-        }
+
+        $latestCompletedMonth = Carbon::today()->startOfMonth()->subMonth()->format('F Y');
+        throw ValidationException::withMessages([
+            'period_end' => ["{$periodEnd->format('F Y')} is still open. It can be closed after {$periodEnd->format('F j, Y')}. The latest completed month is {$latestCompletedMonth}."],
+        ]);
     }
 
     private function validateMonth(string $start, string $end): array
     {
         $startDate = Carbon::parse($start);
         $endDate = Carbon::parse($end);
-        if (!$startDate->isSameMonth($endDate) || !$startDate->isStartOfMonth() || !$endDate->isEndOfMonth()) {
+        if (! $startDate->isSameMonth($endDate) || ! $startDate->isStartOfMonth() || ! $endDate->isEndOfMonth()) {
             throw ValidationException::withMessages(['period_end' => ['Monthly closing must start on the first day and end on the last day of the same month.']]);
         }
 

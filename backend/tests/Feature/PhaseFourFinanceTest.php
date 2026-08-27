@@ -8,6 +8,8 @@ use App\Models\FinancialCategory;
 use App\Models\PaymentMethod;
 use App\Models\ShareholderDistributionItem;
 use App\Models\User;
+use App\Services\FinancialReportingService;
+use Carbon\Carbon;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Laravel\Sanctum\Sanctum;
 use Spatie\Permission\Models\Role;
@@ -16,6 +18,68 @@ use Tests\TestCase;
 class PhaseFourFinanceTest extends TestCase
 {
     use RefreshDatabase;
+
+    public function test_monthly_closing_blocks_open_month_and_names_each_missing_reconciliation(): void
+    {
+        Carbon::setTestNow('2026-08-01 09:00:00');
+
+        try {
+            [$accountant] = $this->financeUsers();
+            [$cashAccount] = $this->cashSetup(1000);
+            $bankAccount = AccountingAccount::query()->create([
+                'name' => 'Phase Four Bank',
+                'code' => 'phase_four_bank',
+                'type' => 'bank',
+                'opening_balance' => 2500,
+                'current_balance' => 2500,
+                'status' => 'active',
+            ]);
+            $bankAccount->forceFill(['created_at' => '2026-06-30 12:00:00'])->save();
+            $futureAccount = AccountingAccount::query()->create([
+                'name' => 'August Purchase Account',
+                'code' => 'august_purchase_account',
+                'type' => 'cash',
+                'opening_balance' => 10000,
+                'current_balance' => 10000,
+                'status' => 'active',
+            ]);
+
+            $this->assertSame(0.0, app(FinancialReportingService::class)->bookBalance($futureAccount, '2026-07-31'));
+
+            Sanctum::actingAs($accountant);
+            $this->postJson('/api/financial-closings', [
+                'period_start' => '2026-08-01',
+                'period_end' => '2026-08-31',
+            ])->assertUnprocessable()
+                ->assertJsonPath('errors.period_end.0', 'August 2026 is still open. It can be closed after August 31, 2026. The latest completed month is July 2026.');
+
+            $closingId = $this->postJson('/api/financial-closings', [
+                'period_start' => '2026-07-01',
+                'period_end' => '2026-07-31',
+            ])->assertCreated()->json('data.id');
+
+            $this->getJson('/api/financial-closings')
+                ->assertOk()
+                ->assertJsonPath('data.0.id', $closingId)
+                ->assertJsonPath('data.0.readiness.period_ended', true)
+                ->assertJsonPath('data.0.readiness.pending_transactions', 0)
+                ->assertJsonPath('data.0.readiness.reconciliation.required_count', 2)
+                ->assertJsonPath('data.0.readiness.reconciliation.approved_count', 0)
+                ->assertJsonPath('data.0.readiness.reconciliation.complete', false)
+                ->assertJsonFragment(['account_id' => $cashAccount->id, 'status' => 'missing'])
+                ->assertJsonFragment(['account_id' => $bankAccount->id, 'status' => 'missing'])
+                ->assertJsonMissing(['account_id' => $futureAccount->id]);
+
+            $response = $this->postJson("/api/financial-closings/{$closingId}/submit")
+                ->assertUnprocessable();
+            $message = $response->json('errors.reconciliation.0');
+            $this->assertStringContainsString('Phase Four Cash (not created)', $message);
+            $this->assertStringContainsString('Phase Four Bank (not created)', $message);
+            $this->assertStringContainsString('period end 2026-07-31', $message);
+        } finally {
+            Carbon::setTestNow();
+        }
+    }
 
     public function test_payroll_posts_to_the_account_only_after_admin_approval(): void
     {
@@ -53,6 +117,11 @@ class PhaseFourFinanceTest extends TestCase
         $this->postJson("/api/payroll-runs/{$payrollId}/approve")->assertOk()->assertJsonPath('data.status', 'approved');
         $this->assertEquals(9000, (float) $account->fresh()->current_balance);
         $this->assertDatabaseHas('accounting_transactions', ['source_type' => 'payroll_run', 'source_id' => $payrollId, 'status' => 'approved', 'amount' => 1000]);
+        $accountsResponse = $this->getJson('/api/accounting/accounts')
+            ->assertOk()
+            ->assertHeader('Cache-Control', 'must-revalidate, no-cache, no-store, private');
+        $accountPayload = collect($accountsResponse->json('data'))->firstWhere('id', $account->id);
+        $this->assertSame('9000.00', $accountPayload['current_balance']);
 
         $this->getJson('/api/financial-reports?from=2026-07-01&to=2026-07-31')
             ->assertOk()
@@ -123,8 +192,12 @@ class PhaseFourFinanceTest extends TestCase
         ])->assertUnprocessable()->assertJsonValidationErrors('transaction_date');
 
         Sanctum::actingAs($accountant);
-        $this->postJson('/api/shareholders', ['name' => 'Shareholder A', 'investment_amount' => 6000, 'ownership_percentage' => 60, 'status' => 'active'])->assertCreated();
-        $this->postJson('/api/shareholders', ['name' => 'Shareholder B', 'investment_amount' => 4000, 'ownership_percentage' => 40, 'status' => 'active'])->assertCreated();
+        $this->postJson('/api/shareholders', ['name' => 'Shareholder A', 'shareholder_type' => 'company', 'investment_amount' => 6000, 'ownership_percentage' => 60, 'status' => 'active'])
+            ->assertCreated()
+            ->assertJsonPath('data.shareholder_type', 'company');
+        $this->postJson('/api/shareholders', ['name' => 'Shareholder B', 'investment_amount' => 4000, 'ownership_percentage' => 40, 'status' => 'active'])
+            ->assertCreated()
+            ->assertJsonPath('data.shareholder_type', 'individual');
         $distributionId = $this->postJson('/api/shareholder-distributions', [
             'financial_period_closing_id' => $closingId,
             'distributable_amount' => 1000,
@@ -141,7 +214,7 @@ class PhaseFourFinanceTest extends TestCase
         Sanctum::actingAs($accountant);
         $transactionId = $this->postJson("/api/shareholder-distribution-items/{$item->id}/payments", [
             'amount' => 400,
-            'payment_date' => '2026-08-05',
+            'payment_date' => '2026-08-02',
             'payment_method_id' => $method->id,
             'accounting_account_id' => $account->id,
         ])->assertCreated()->json('data.transaction.id');
@@ -185,6 +258,7 @@ class PhaseFourFinanceTest extends TestCase
             'current_balance' => $openingBalance,
             'status' => 'active',
         ]);
+        $account->forceFill(['created_at' => '2026-06-30 12:00:00'])->save();
 
         return [$account, $method];
     }

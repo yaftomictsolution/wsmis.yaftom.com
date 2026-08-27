@@ -44,6 +44,7 @@ class PhaseSixDemoSeeder extends Seeder
         $hr = $this->user('hr@waternet.local', 'Maryam Habibi', 'HR', '0799001002');
         $accountant = $this->user('accountant@waternet.local', 'Laila Rahimi', 'Accountant', '0799001003');
         $technician = $this->user('technician@waternet.local', 'Ahmad Karimi', 'Technician', '0799111222');
+        $technician->assignRole('Meter Assigner');
         $formerEmployee = $this->user('farid.safi@waternet.local', 'Farid Safi', 'Technician', '0799001004');
 
         $operations = Department::query()->create([
@@ -341,7 +342,7 @@ class PhaseSixDemoSeeder extends Seeder
 
     private function employee(User $user, JobPosition $position, ?int $areaId, array $data, User $admin): Employee
     {
-        return Employee::query()->create($data + [
+        return Employee::query()->updateOrCreate(['user_id' => $user->id], $data + [
             'user_id' => $user->id, 'job_position_id' => $position->id, 'service_area_id' => $areaId,
             'created_by' => $admin->id, 'updated_by' => $admin->id, 'email' => $user->email,
             'employment_type' => 'permanent', 'daily_rate' => 0, 'standard_daily_hours' => 8,

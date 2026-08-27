@@ -16,6 +16,21 @@ class LeaveSettingsTest extends TestCase
 {
     use RefreshDatabase;
 
+    public function test_leave_dropdown_self_initializes_the_simple_default_policies(): void
+    {
+        LeavePolicy::query()->delete();
+        Sanctum::actingAs($this->userWithRole('Admin'));
+
+        $this->getJson('/api/leave-policies?year=2026')
+            ->assertOk()
+            ->assertJsonCount(4, 'data.policies');
+
+        $this->assertDatabaseHas('leave_policies', ['code' => 'annual', 'status' => 'active']);
+        $this->assertDatabaseHas('leave_policies', ['code' => 'sick', 'status' => 'active']);
+        $this->assertDatabaseHas('leave_policies', ['code' => 'emergency', 'status' => 'active']);
+        $this->assertDatabaseHas('leave_policies', ['code' => 'unpaid', 'status' => 'active']);
+    }
+
     public function test_admin_can_manage_simple_leave_settings_without_losing_balance_adjustments(): void
     {
         $admin = $this->userWithRole('Admin');

@@ -7,7 +7,6 @@ use App\Http\Controllers\Api\CustomerController;
 use App\Http\Controllers\Api\CustomerDocumentController;
 use App\Http\Controllers\Api\CustomerOperationsController;
 use App\Http\Controllers\Api\MeterAssignmentController;
-use App\Http\Controllers\Api\MeterController;
 use App\Http\Controllers\Api\MeterReadingController;
 use App\Http\Controllers\Api\PaymentController;
 use App\Models\AccountingAccount;
@@ -18,6 +17,7 @@ use App\Models\CustomerCharge;
 use App\Models\CustomerChargeType;
 use App\Models\CustomerContract;
 use App\Models\CustomerServiceRequest;
+use App\Models\Employee;
 use App\Models\Invoice;
 use App\Models\Meter;
 use App\Models\MeterAssignment;
@@ -108,6 +108,7 @@ class BillingWorkflowDemoSeeder extends Seeder
         $managerRole = Role::findOrCreate('Manager', 'web');
         $collectorRole = Role::findOrCreate('Collector', 'web');
         $technicianRole = Role::findOrCreate('Technician', 'web');
+        $meterAssignerRole = Role::findOrCreate('Meter Assigner', 'web');
         $readerRole = Role::findOrCreate('Meter Reader', 'web');
         $adminRole->givePermissionTo(Permission::query()->get());
         $managerRole->givePermissionTo(Permission::query()->whereIn('name', [
@@ -126,6 +127,10 @@ class BillingWorkflowDemoSeeder extends Seeder
             'dashboard.view', 'customers.view', 'meters.view', 'meter-assignments.view',
             'meter-assignments.create',
         ])->get());
+        $meterAssignerRole->givePermissionTo(Permission::query()->whereIn('name', [
+            'dashboard.view', 'customers.view', 'meters.view', 'meter-assignments.view',
+            'meter-assignments.create', 'meter-assignments.update',
+        ])->get());
         $readerRole->givePermissionTo(Permission::query()->whereIn('name', [
             'dashboard.view', 'customers.view', 'meters.view', 'meter-assignments.view',
             'billing-periods.view', 'meter-readings.view', 'meter-readings.create',
@@ -138,6 +143,25 @@ class BillingWorkflowDemoSeeder extends Seeder
             'technician' => $this->demoUser('WaterNet Demo Technician', 'technician@waternet.local', '0799000003', $technicianRole),
             'reader' => $this->demoUser('WaterNet Demo Reader', 'reader@waternet.local', '0799000004', $readerRole),
         ];
+        $users['technician']->assignRole($meterAssignerRole);
+        Employee::query()->updateOrCreate(
+            ['user_id' => $users['technician']->id],
+            [
+                'employee_number' => 'EMP-METER-ASSIGNER-DEMO',
+                'first_name' => 'WaterNet Demo',
+                'last_name' => 'Technician',
+                'email' => $users['technician']->email,
+                'hire_date' => '2026-01-01',
+                'employment_type' => 'permanent',
+                'salary_type' => 'fixed',
+                'base_salary' => 18000,
+                'standard_daily_hours' => 8,
+                'work_start_time' => '08:00',
+                'work_end_time' => '16:00',
+                'work_days' => [1, 2, 3, 4, 5, 6],
+                'status' => 'active',
+            ],
+        );
 
         SystemSetting::query()->updateOrCreate(
             ['key' => 'system_profile'],
@@ -146,6 +170,8 @@ class BillingWorkflowDemoSeeder extends Seeder
                 'system_name' => 'Water Supply Management Information System',
                 'currency' => 'AFN',
                 'language' => 'en',
+                'calendar_system' => 'shamsi',
+                'show_gregorian_secondary' => false,
                 'phone' => '0799000000',
                 'address' => 'Kabul, Afghanistan',
             ]],
@@ -193,6 +219,10 @@ class BillingWorkflowDemoSeeder extends Seeder
                 'notes' => 'Dedicated area for repeatable invoice-first workflow demonstrations.',
             ],
         );
+        $mosque = $area->mosques()->updateOrCreate(
+            ['name' => 'TEST Central Mosque'],
+            ['status' => 'active'],
+        );
         $period = BillingPeriod::query()->updateOrCreate(
             ['code' => 'TEST-2026-07'],
             [
@@ -211,7 +241,7 @@ class BillingWorkflowDemoSeeder extends Seeder
 
         return $users + compact(
             'cashMethod', 'bankMethod', 'cashAccount', 'bankAccount',
-            'area', 'period', 'serviceType',
+            'area', 'mosque', 'period', 'serviceType',
         );
     }
 
@@ -249,6 +279,7 @@ class BillingWorkflowDemoSeeder extends Seeder
     {
         $customer = $this->createCustomer($references['manager'], [
             'service_area_id' => $references['area']->id,
+            'service_area_mosque_id' => $references['mosque']->id,
             'subscription_code' => self::CUSTOMER_CODES[0],
             'name' => 'TEST Ahmad',
             'last_name' => 'Rahimi',
@@ -322,6 +353,7 @@ class BillingWorkflowDemoSeeder extends Seeder
     {
         $customer = $this->createCustomer($references['manager'], [
             'service_area_id' => $references['area']->id,
+            'service_area_mosque_id' => $references['mosque']->id,
             'subscription_code' => self::CUSTOMER_CODES[1],
             'name' => 'TEST Laila',
             'last_name' => 'Noori',
@@ -438,6 +470,7 @@ class BillingWorkflowDemoSeeder extends Seeder
     {
         $customer = $this->createCustomer($references['manager'], [
             'service_area_id' => $references['area']->id,
+            'service_area_mosque_id' => $references['mosque']->id,
             'subscription_code' => self::CUSTOMER_CODES[2],
             'name' => 'TEST Mariam',
             'last_name' => 'Azizi',
@@ -502,10 +535,18 @@ class BillingWorkflowDemoSeeder extends Seeder
 
     private function createCustomer(User $user, array $data): Customer
     {
+        $demoSubscriptionCode = $data['subscription_code'] ?? null;
         $response = app(CustomerController::class)->store($this->request($user, $data));
         $created = $this->responseData($response, 201);
+        $customer = Customer::query()->findOrFail($created['id']);
 
-        return Customer::query()->findOrFail($created['id']);
+        // Customer codes are generated by the application. Demo records keep stable
+        // TEST codes afterward so repeated seed runs can locate the same scenarios.
+        if (is_string($demoSubscriptionCode) && $demoSubscriptionCode !== '') {
+            $customer->update(['subscription_code' => $demoSubscriptionCode]);
+        }
+
+        return $customer->fresh();
     }
 
     private function createContract(Customer $customer, User $user, array $data): CustomerContract
@@ -546,11 +587,18 @@ class BillingWorkflowDemoSeeder extends Seeder
         User $technician,
         string $sealNumber,
     ): MeterAssignment {
+        $meterAssignerId = Employee::query()
+            ->where('user_id', $technician->id)
+            ->where('status', 'active')
+            ->value('id');
+        throw_unless($meterAssignerId, RuntimeException::class, 'The demo Meter Assigner employee is missing.');
+
         $created = $this->responseData(
             app(MeterAssignmentController::class)->store($this->request($technician, [
                 'customer_id' => $customer->id,
                 'customer_contract_id' => $contract->id,
                 'meter_id' => $meter->id,
+                'meter_assigner_id' => $meterAssignerId,
                 'initial_reading' => 0,
                 'installation_date' => '2026-07-18',
                 'seal_number' => $sealNumber,

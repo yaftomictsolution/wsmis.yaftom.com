@@ -11,6 +11,7 @@ use App\Models\Payment;
 use App\Models\PaymentAllocation;
 use App\Services\AccountingWorkflowService;
 use App\Services\CustomerBillingService;
+use Illuminate\Database\QueryException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Collection;
@@ -55,58 +56,92 @@ class PaymentController extends Controller
             'customer_id' => ['required', 'integer', 'exists:customers,id'],
             'payment_method_id' => ['required', 'integer', 'exists:payment_methods,id'],
             'accounting_account_id' => ['required', 'integer', 'exists:accounting_accounts,id'],
-            'paid_at' => ['required', 'date'],
+            'paid_at' => ['required', 'date', 'before_or_equal:today'],
+            'idempotency_key' => ['nullable', 'string', 'max:100'],
+            'discount_authority_id' => [
+                'nullable',
+                'integer',
+                Rule::exists('authorities', 'id')->where('status', 'active'),
+            ],
             'reference' => ['nullable', 'string', 'max:255'],
             'notes' => ['nullable', 'string'],
             'items' => ['required', 'array', 'min:1'],
             'items.*.type' => ['required', Rule::in(['invoice'])],
             'items.*.id' => ['required', 'integer'],
-            'items.*.amount' => ['nullable', 'numeric', 'min:0.01'],
+            'items.*.amount' => ['nullable', 'numeric', 'min:0'],
+            'items.*.discount_amount' => ['nullable', 'numeric', 'min:0'],
         ]);
+
+        if ($existing = $this->idempotentPayment($data['idempotency_key'] ?? null, $request->user()->id)) {
+            return response()->json(['data' => $existing]);
+        }
 
         $this->workflow->ensureDateIsOpen($data['paid_at']);
         $this->workflow->ensureCompatibleAccount((int) $data['payment_method_id'], (int) $data['accounting_account_id']);
 
-        $payment = DB::transaction(function () use ($request, $data): Payment {
-            $customer = Customer::query()->whereKey($data['customer_id'])->lockForUpdate()->firstOrFail();
+        try {
+            $payment = DB::transaction(function () use ($request, $data): Payment {
+                if ($existing = $this->idempotentPayment($data['idempotency_key'] ?? null, $request->user()->id, true)) {
+                    return $existing;
+                }
 
-            $allocations = $this->prepareAllocations($customer, $data['items']);
-            $totalAmount = round((float) collect($allocations)->sum('amount'), 2);
-            $invoiceIds = collect($allocations)->pluck('invoice_id')->unique()->values();
-            $contractIds = collect($allocations)->pluck('customer_contract_id')->filter()->unique()->values();
+                $customer = Customer::query()->whereKey($data['customer_id'])->lockForUpdate()->firstOrFail();
 
-            $payment = Payment::query()->create([
-                'invoice_id' => $invoiceIds->first(),
-                'customer_id' => $customer->id,
-                'customer_contract_id' => $contractIds->count() === 1 ? $contractIds->first() : null,
-                'payment_method_id' => $data['payment_method_id'],
-                'accounting_account_id' => $data['accounting_account_id'],
-                'received_by' => $request->user()->id,
-                'receipt_number' => Payment::nextReceiptNumber(),
-                'amount' => $totalAmount,
-                'paid_at' => $data['paid_at'],
-                'reference' => $data['reference'] ?? null,
-                'status' => 'posted',
-                'notes' => $data['notes'] ?? null,
-            ]);
+                $allocations = $this->prepareAllocations(
+                    $customer,
+                    $data['items'],
+                    $data['paid_at'],
+                    isset($data['discount_authority_id']) ? (int) $data['discount_authority_id'] : null,
+                );
+                $totalAmount = round((float) collect($allocations)->sum('amount'), 2);
+                $discountAmount = round((float) collect($allocations)->sum('discount_amount'), 2);
+                $invoiceIds = collect($allocations)->pluck('invoice_id')->unique()->values();
+                $contractIds = collect($allocations)->pluck('customer_contract_id')->filter()->unique()->values();
 
-            foreach ($allocations as $allocation) {
-                $payment->allocations()->create([
-                    'invoice_id' => $allocation['invoice_id'],
-                    'customer_charge_id' => null,
-                    'amount' => $allocation['amount'],
+                $payment = Payment::query()->create([
+                    'invoice_id' => $invoiceIds->first(),
+                    'customer_id' => $customer->id,
+                    'customer_contract_id' => $contractIds->count() === 1 ? $contractIds->first() : null,
+                    'payment_method_id' => $data['payment_method_id'],
+                    'accounting_account_id' => $data['accounting_account_id'],
+                    'discount_authority_id' => $discountAmount > 0.005 ? $data['discount_authority_id'] : null,
+                    'received_by' => $request->user()->id,
+                    'receipt_number' => Payment::nextReceiptNumber(),
+                    'idempotency_key' => $data['idempotency_key'] ?? null,
+                    'amount' => $totalAmount,
+                    'discount_amount' => $discountAmount,
+                    'paid_at' => $data['paid_at'],
+                    'reference' => $data['reference'] ?? null,
+                    'status' => 'posted',
+                    'notes' => $data['notes'] ?? null,
                 ]);
+
+                foreach ($allocations as $allocation) {
+                    $payment->allocations()->create([
+                        'invoice_id' => $allocation['invoice_id'],
+                        'customer_charge_id' => null,
+                        'amount' => $allocation['amount'],
+                        'discount_amount' => $allocation['discount_amount'],
+                    ]);
+                }
+
+                foreach ($invoiceIds as $invoiceId) {
+                    $this->billing->syncInvoice((int) $invoiceId, $data['paid_at']);
+                }
+                $this->postPaymentToAccounting($payment);
+
+                return $payment->load($this->relations());
+            });
+        } catch (QueryException $exception) {
+            $existing = $this->idempotentPayment($data['idempotency_key'] ?? null, $request->user()->id);
+            if ($exception->getCode() === '23000' && $existing) {
+                return response()->json(['data' => $existing]);
             }
 
-            foreach ($invoiceIds as $invoiceId) {
-                $this->billing->syncInvoice((int) $invoiceId, $data['paid_at']);
-            }
-            $this->postPaymentToAccounting($payment);
+            throw $exception;
+        }
 
-            return $payment->fresh()->load($this->relations());
-        });
-
-        return response()->json(['data' => $payment], 201);
+        return response()->json(['data' => $payment], $payment->wasRecentlyCreated ? 201 : 200);
     }
 
     public function show(Request $request, Payment $payment): JsonResponse
@@ -178,7 +213,7 @@ class PaymentController extends Controller
         return response()->json(['data' => $payment->fresh()->load($this->relations())]);
     }
 
-    private function prepareAllocations(Customer $customer, array $items): array
+    private function prepareAllocations(Customer $customer, array $items, string $paidAt, ?int $discountAuthorityId): array
     {
         $allocations = [];
         $seen = [];
@@ -202,6 +237,11 @@ class PaymentController extends Controller
             if ($invoice->invoice_type !== 'inventory' && ! $customer->contractAllowsWorkflow()) {
                 abort(422, 'Customer contract must be confirmed before payment processing.');
             }
+            if ($invoice->issue_date && $invoice->issue_date->toDateString() > $paidAt) {
+                throw ValidationException::withMessages([
+                    'paid_at' => ["Payment date cannot be before invoice {$invoice->invoice_number} was issued."],
+                ]);
+            }
             abort_if(in_array($invoice->status, ['paid', 'cancelled'], true), 422, 'Selected invoice is not payable.');
             if ($invoice->invoice_type === 'contract' && (! $invoice->contract || ! in_array($invoice->contract->status, ['installation_pending', 'active'], true))) {
                 throw ValidationException::withMessages([
@@ -210,13 +250,28 @@ class PaymentController extends Controller
             }
 
             $remainingAmount = (float) $invoice->remaining_amount;
-            $amount = (float) ($item['amount'] ?? $remainingAmount);
-            $this->ensureAllocationAmount($amount, $remainingAmount);
+            $discountAmount = round((float) ($item['discount_amount'] ?? 0), 2);
+            if ($discountAmount > 0.005 && $invoice->invoice_type !== 'water') {
+                throw ValidationException::withMessages([
+                    'items' => ['Payment discounts can only be applied to meter-reading water invoices.'],
+                ]);
+            }
+            if ($discountAmount > 0.005 && ! $discountAuthorityId) {
+                throw ValidationException::withMessages([
+                    'discount_authority_id' => ['Select the authority who granted this water bill discount.'],
+                ]);
+            }
+
+            $amount = array_key_exists('amount', $item) && $item['amount'] !== null
+                ? (float) $item['amount']
+                : max(0, $remainingAmount - $discountAmount);
+            $this->ensureAllocationAmount($amount, $discountAmount, $remainingAmount);
 
             $allocations[] = [
                 'invoice_id' => $invoice->id,
                 'customer_contract_id' => $invoice->customer_contract_id,
                 'amount' => round($amount, 2),
+                'discount_amount' => $discountAmount,
             ];
         }
 
@@ -229,18 +284,35 @@ class PaymentController extends Controller
         return $allocations;
     }
 
-    private function ensureAllocationAmount(float $amount, float $remainingAmount): void
+    private function ensureAllocationAmount(float $amount, float $discountAmount, float $remainingAmount): void
     {
         if ($remainingAmount <= 0.005) {
             throw ValidationException::withMessages([
                 'items' => ['Selected invoice is already paid.'],
             ]);
         }
-        if ($amount <= 0 || $amount > $remainingAmount + 0.005) {
+        $settlementAmount = $amount + $discountAmount;
+        if ($amount < 0 || $discountAmount < 0 || $settlementAmount <= 0 || $settlementAmount > $remainingAmount + 0.005) {
             throw ValidationException::withMessages([
-                'items' => ['Payment amount cannot be greater than the selected invoice remaining amount.'],
+                'items' => ['Cash received plus discount cannot be greater than the selected invoice remaining amount.'],
             ]);
         }
+    }
+
+    private function idempotentPayment(?string $key, int $userId, bool $lock = false): ?Payment
+    {
+        if (! $key) {
+            return null;
+        }
+
+        $query = Payment::query()
+            ->where('idempotency_key', $key)
+            ->where('received_by', $userId);
+        if ($lock) {
+            $query->lockForUpdate();
+        }
+
+        return $query->first()?->load($this->relations());
     }
 
     private function postPaymentToAccounting(Payment $payment): void
@@ -368,14 +440,15 @@ class PaymentController extends Controller
     private function relations(): array
     {
         return [
-            'invoice:id,invoice_number,invoice_type,total_amount,paid_amount,remaining_amount,status',
+            'invoice:id,invoice_number,invoice_type,total_amount,paid_amount,payment_discount_amount,remaining_amount,status',
             'customer:id,name,phone,house_number,service_area_id',
             'paymentMethod:id,name,code',
             'account:id,name,code,type,current_balance',
             'receiver:id,name',
+            'discountAuthority:id,authority_number,name,father_name,title,status',
             'refunder:id,name',
-            'refundTransaction',
-            'allocations.invoice:id,invoice_number,invoice_type,total_amount,paid_amount,remaining_amount,status',
+            'refundTransaction.account:id,name,code,type,current_balance',
+            'allocations.invoice:id,invoice_number,invoice_type,total_amount,paid_amount,payment_discount_amount,remaining_amount,status',
             'allocations.charge:id,title,type,amount,paid_amount,remaining_amount,status',
         ];
     }

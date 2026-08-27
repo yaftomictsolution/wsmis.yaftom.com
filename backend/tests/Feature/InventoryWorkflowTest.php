@@ -14,6 +14,7 @@ use App\Models\ServiceArea;
 use App\Models\Supplier;
 use App\Models\User;
 use App\Models\Warehouse;
+use App\Services\FinancialReportingService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Laravel\Sanctum\Sanctum;
 use Spatie\Permission\Models\Role;
@@ -27,12 +28,15 @@ class InventoryWorkflowTest extends TestCase
     {
         [$staff, $admin] = $this->users();
         [$warehouse, $supplier, $good, $account] = $this->inventorySetup();
+        $paymentMethod = PaymentMethod::query()->where('code', 'cash')->firstOrFail();
 
         Sanctum::actingAs($staff);
         $purchaseId = $this->postJson('/api/inventory-requests', [
             'type' => 'purchase',
             'supplier_id' => $supplier->id,
             'accounting_account_id' => $account->id,
+            'payment_method_id' => $paymentMethod->id,
+            'amount_paid' => 700,
             'warehouse_id' => $warehouse->id,
             'request_date' => '2026-07-27',
             'items' => [[
@@ -42,6 +46,7 @@ class InventoryWorkflowTest extends TestCase
             ]],
         ])->assertCreated()
             ->assertJsonPath('data.status', 'pending')
+            ->assertJsonPath('data.initial_payment_amount', '700.00')
             ->assertJsonPath('data.warehouse.id', $warehouse->id)
             ->json('data.id');
 
@@ -49,16 +54,22 @@ class InventoryWorkflowTest extends TestCase
         $this->assertEquals(10000, (float) $account->fresh()->current_balance);
 
         Sanctum::actingAs($admin);
-        $this->postJson("/api/inventory-requests/{$purchaseId}/approve", [
+        $purchaseApproval = $this->postJson("/api/inventory-requests/{$purchaseId}/approve", [
             'status' => 'approved',
         ])->assertOk()
             ->assertJsonPath('data.status', 'approved')
+            ->assertJsonPath('data.paid_amount', '700.00')
+            ->assertJsonPath('data.remaining_amount', '1300.00')
+            ->assertJsonPath('data.payment_status', 'partially_paid')
             ->assertJsonPath('data.items.0.inventory_item_id', fn ($value) => (int) $value > 0);
+        $purchaseDocumentNumber = $purchaseApproval->json('data.document_number');
+        $this->assertMatchesRegularExpression('/^PB-\d{8}-\d{5}$/', $purchaseDocumentNumber);
+        $this->assertNotNull($purchaseApproval->json('data.document_generated_at'));
 
         $stock = InventoryItem::query()->where('good_id', $good->id)->where('warehouse_id', $warehouse->id)->firstOrFail();
         $this->assertEquals(10, (float) $stock->quantity);
         $this->assertEquals(200, (float) $stock->unit_cost);
-        $this->assertEquals(8000, (float) $account->fresh()->current_balance);
+        $this->assertEquals(9300, (float) $account->fresh()->current_balance);
         $this->assertDatabaseHas('inventory_transactions', [
             'inventory_item_id' => $stock->id,
             'type' => 'purchase',
@@ -66,23 +77,48 @@ class InventoryWorkflowTest extends TestCase
             'reference_id' => $purchaseId,
         ]);
         $this->assertDatabaseHas('accounting_transactions', [
-            'source_type' => 'inventory_request',
-            'source_id' => $purchaseId,
+            'source_type' => 'inventory_purchase_payment',
             'type' => 'expense',
-            'amount' => 2000,
+            'amount' => 700,
         ]);
+        $this->assertDatabaseHas('inventory_purchase_payments', [
+            'inventory_request_id' => $purchaseId,
+            'accounting_account_id' => $account->id,
+            'amount' => 700,
+            'status' => 'posted',
+        ]);
+        $this->assertDatabaseHas('inventory_requests', [
+            'id' => $purchaseId,
+            'document_number' => $purchaseDocumentNumber,
+        ]);
+        $this->assertEquals(
+            1300,
+            app(FinancialReportingService::class)->periodSnapshot('2026-07-01', '2026-07-31')['supplier_payables'],
+        );
+
+        $this->postJson("/api/inventory-requests/{$purchaseId}/payments", [
+            'payment_method_id' => $paymentMethod->id,
+            'accounting_account_id' => $account->id,
+            'amount' => 1300,
+            'paid_at' => '2026-07-27',
+            'reference' => 'Final supplier payment',
+        ])->assertCreated()
+            ->assertJsonPath('data.paid_amount', '2000.00')
+            ->assertJsonPath('data.remaining_amount', '0.00')
+            ->assertJsonPath('data.payment_status', 'paid')
+            ->assertJsonCount(2, 'data.purchase_payments');
+        $this->assertEquals(8000, (float) $account->fresh()->current_balance);
+        $this->assertEquals(
+            0,
+            app(FinancialReportingService::class)->periodSnapshot('2026-07-01', '2026-07-31')['supplier_payables'],
+        );
 
         $customer = Customer::query()->create([
             'service_area_id' => ServiceArea::query()->firstOrFail()->id,
             'name' => 'Inventory Customer',
             'phone' => '0700000999',
-            'status' => 'active',
+            'status' => 'awaiting_installation',
         ]);
-        $paymentMethod = PaymentMethod::query()->firstOrCreate(
-            ['code' => 'cash'],
-            ['name' => 'Cash', 'status' => 'active'],
-        );
-
         Sanctum::actingAs($staff);
         $issueId = $this->postJson('/api/inventory-requests', [
             'type' => 'issue',
@@ -108,7 +144,7 @@ class InventoryWorkflowTest extends TestCase
         $this->assertEquals(8000, (float) $account->fresh()->current_balance);
 
         Sanctum::actingAs($admin);
-        $this->postJson("/api/inventory-requests/{$issueId}/approve", [
+        $saleApproval = $this->postJson("/api/inventory-requests/{$issueId}/approve", [
             'status' => 'approved',
         ])->assertOk()
             ->assertJsonPath('data.status', 'approved')
@@ -116,6 +152,15 @@ class InventoryWorkflowTest extends TestCase
             ->assertJsonPath('data.invoice.paid_amount', '400.00')
             ->assertJsonPath('data.invoice.remaining_amount', '650.00')
             ->assertJsonPath('data.invoice.status', 'partially_paid');
+        $this->assertSame(
+            $saleApproval->json('data.invoice.invoice_number'),
+            $saleApproval->json('data.document_number'),
+        );
+        $this->assertNotNull($saleApproval->json('data.document_generated_at'));
+        $this->getJson('/api/invoices')
+            ->assertOk()
+            ->assertJsonPath('data.0.inventory_request.id', $issueId)
+            ->assertJsonPath('data.0.inventory_request.document_number', $saleApproval->json('data.document_number'));
 
         $this->assertEquals(7, (float) $stock->fresh()->quantity);
         $this->assertEquals(8400, (float) $account->fresh()->current_balance);
@@ -174,6 +219,79 @@ class InventoryWorkflowTest extends TestCase
             ->assertJsonPath('data.data.0.invoice.paid_amount', '650.00')
             ->assertJsonPath('data.data.0.invoice.remaining_amount', '400.00')
             ->assertJsonCount(2, 'data.data.0.invoice.allocations');
+    }
+
+    public function test_warehouse_purchase_notifies_admin_and_resolution_notifies_requester(): void
+    {
+        $warehouseRole = Role::findOrCreate('Warehouse Officer', 'web');
+        $adminRole = Role::findOrCreate('Admin', 'web');
+        $warehouseOfficer = User::factory()->create(['status' => 'active']);
+        $admin = User::factory()->create(['status' => 'active']);
+        $warehouseOfficer->assignRole($warehouseRole);
+        $admin->assignRole($adminRole);
+        [$warehouse, $supplier, $good, $account] = $this->inventorySetup();
+        AccountingAccount::query()->create([
+            'name' => 'Inactive Inventory Account',
+            'code' => 'inactive_inventory',
+            'type' => 'cash',
+            'opening_balance' => 5000,
+            'current_balance' => 5000,
+            'status' => 'inactive',
+        ]);
+
+        Sanctum::actingAs($warehouseOfficer);
+        $this->getJson('/api/accounting/accounts')
+            ->assertForbidden();
+        $this->getJson('/api/inventory-requests/purchase-accounts')
+            ->assertOk()
+            ->assertJsonFragment([
+                'id' => $account->id,
+                'name' => 'Inventory Cash',
+                'code' => 'inventory_cash',
+                'current_balance' => '10000.00',
+                'status' => 'active',
+            ])
+            ->assertJsonMissing(['code' => 'inactive_inventory']);
+
+        $requestId = $this->postJson('/api/inventory-requests', [
+            'type' => 'purchase',
+            'supplier_id' => $supplier->id,
+            'accounting_account_id' => $account->id,
+            'payment_method_id' => PaymentMethod::query()->where('code', 'cash')->value('id'),
+            'amount_paid' => 400,
+            'warehouse_id' => $warehouse->id,
+            'request_date' => '2026-07-27',
+            'items' => [[
+                'good_id' => $good->id,
+                'quantity' => 2,
+                'unit_price' => 200,
+            ]],
+        ])->assertCreated()
+            ->assertJsonPath('data.status', 'pending')
+            ->json('data.id');
+
+        $submittedNotification = $admin->fresh()->unreadNotifications()->first();
+        $this->assertNotNull($submittedNotification);
+        $this->assertSame('inventory_request_submitted', $submittedNotification->data['event']);
+        $this->assertSame($requestId, $submittedNotification->data['inventory_request_id']);
+        $this->assertSame('/dashboard/inventory-manager?view=purchase', $submittedNotification->data['href']);
+
+        Sanctum::actingAs($admin);
+        $this->getJson('/api/notifications')
+            ->assertOk()
+            ->assertJsonPath('unread_count', 1)
+            ->assertJsonPath('data.0.data.inventory_request_id', $requestId);
+        $this->postJson("/api/inventory-requests/{$requestId}/approve", [
+            'status' => 'approved',
+        ])->assertOk()
+            ->assertJsonPath('data.status', 'approved');
+
+        $resolvedNotification = $warehouseOfficer->fresh()->unreadNotifications()->first();
+        $this->assertNotNull($resolvedNotification);
+        $this->assertSame('inventory_request_resolved', $resolvedNotification->data['event']);
+        $this->assertSame($requestId, $resolvedNotification->data['inventory_request_id']);
+        $this->assertSame('approved', InventoryRequest::query()->findOrFail($requestId)->status);
+        $this->assertEquals(9600, (float) $account->fresh()->current_balance);
     }
 
     public function test_internal_issue_reduces_stock_without_changing_cash(): void
@@ -353,8 +471,19 @@ class InventoryWorkflowTest extends TestCase
             'status' => 'approved',
         ])->assertForbidden();
 
-        $stock->update(['quantity' => 2]);
+        $customer->update(['status' => 'inactive']);
         Sanctum::actingAs($admin);
+        $this->postJson("/api/inventory-requests/{$requestId}/approve", [
+            'status' => 'approved',
+        ])->assertUnprocessable()
+            ->assertJsonValidationErrors('customer_id');
+
+        $this->assertEquals(5, (float) $stock->fresh()->quantity);
+        $this->assertEquals('pending', InventoryRequest::query()->findOrFail($requestId)->status);
+        $this->assertDatabaseMissing('invoices', ['customer_id' => $customer->id, 'invoice_type' => 'inventory']);
+
+        $customer->update(['status' => 'active']);
+        $stock->update(['quantity' => 2]);
         $this->postJson("/api/inventory-requests/{$requestId}/approve", [
             'status' => 'approved',
         ])->assertUnprocessable()
@@ -365,6 +494,177 @@ class InventoryWorkflowTest extends TestCase
         $this->assertEquals(10000, (float) $account->fresh()->current_balance);
         $this->assertDatabaseMissing('inventory_transactions', ['reference_id' => $requestId]);
         $this->assertDatabaseMissing('invoices', ['customer_id' => $customer->id, 'invoice_type' => 'inventory']);
+    }
+
+    public function test_contract_materials_return_after_one_admin_cancellation_approval_only(): void
+    {
+        [$staff, $admin] = $this->users();
+        $staff->assignRole(Role::findOrCreate('Manager', 'web'));
+        [$warehouse, $supplier, $good, $account] = $this->inventorySetup();
+        $paymentMethod = PaymentMethod::query()->where('code', 'cash')->firstOrFail();
+        $stock = InventoryItem::query()->create([
+            'good_id' => $good->id,
+            'warehouse_id' => $warehouse->id,
+            'name' => $good->name,
+            'code' => $good->code,
+            'category' => $good->category,
+            'unit' => $good->unit,
+            'quantity' => 10,
+            'unit_cost' => 200,
+            'unit_price' => 350,
+            'reorder_level' => 2,
+            'supplier_id' => $supplier->id,
+        ]);
+        $customer = Customer::query()->create([
+            'service_area_id' => ServiceArea::query()->firstOrFail()->id,
+            'name' => 'Contract Material Customer',
+            'phone' => '0700000666',
+            'status' => 'registered',
+        ]);
+
+        Sanctum::actingAs($staff);
+        $contractId = $this->postJson("/api/customers/{$customer->id}/contracts", [
+            'subscription_date' => '2026-07-27',
+            'connection_fee' => 100,
+            'meter_fee' => 0,
+        ])->assertCreated()->json('data.id');
+        $this->postJson("/api/customer-contracts/{$contractId}/confirm")
+            ->assertOk()
+            ->assertJsonPath('data.status', 'installation_pending');
+
+        $contractMaterialId = $this->postJson('/api/inventory-requests', [
+            'type' => 'issue',
+            'issue_type' => 'customer',
+            'issue_purpose' => 'contract_material',
+            'customer_id' => $customer->id,
+            'customer_contract_id' => $contractId,
+            'warehouse_id' => $warehouse->id,
+            'accounting_account_id' => $account->id,
+            'payment_method_id' => $paymentMethod->id,
+            'amount_paid' => 400,
+            'request_date' => '2026-07-27',
+            'items' => [[
+                'inventory_item_id' => $stock->id,
+                'quantity' => 3,
+                'unit_price' => 350,
+            ]],
+        ])->assertCreated()
+            ->assertJsonPath('data.issue_purpose', 'contract_material')
+            ->assertJsonPath('data.customer_contract_id', $contractId)
+            ->json('data.id');
+
+        $separateSaleId = $this->postJson('/api/inventory-requests', [
+            'type' => 'issue',
+            'issue_type' => 'customer',
+            'issue_purpose' => 'separate_sale',
+            'customer_id' => $customer->id,
+            'warehouse_id' => $warehouse->id,
+            'amount_paid' => 0,
+            'request_date' => '2026-07-27',
+            'items' => [[
+                'inventory_item_id' => $stock->id,
+                'quantity' => 1,
+                'unit_price' => 350,
+            ]],
+        ])->assertCreated()
+            ->assertJsonPath('data.issue_purpose', 'separate_sale')
+            ->json('data.id');
+
+        Sanctum::actingAs($admin);
+        $this->postJson("/api/inventory-requests/{$contractMaterialId}/approve", ['status' => 'approved'])
+            ->assertOk();
+        $this->postJson("/api/inventory-requests/{$separateSaleId}/approve", ['status' => 'approved'])
+            ->assertOk();
+        $this->assertEquals(6, (float) $stock->fresh()->quantity);
+        $this->assertEquals(10400, (float) $account->fresh()->current_balance);
+
+        $admin->notifications()->delete();
+        Sanctum::actingAs($staff);
+        $preview = $this->getJson("/api/customer-contracts/{$contractId}/cancellation-preview")
+            ->assertOk()
+            ->assertJsonPath('data.material_request_count', 1)
+            ->assertJsonPath('data.material_line_count', 1)
+            ->assertJsonPath('data.material_quantity', 3)
+            ->assertJsonPath('data.refundable_amount', 400)
+            ->assertJsonPath('data.materials.0.inventory_request_id', $contractMaterialId);
+        $this->assertNotContains($separateSaleId, collect($preview->json('data.materials'))->pluck('inventory_request_id'));
+
+        $cancellationId = $this->postJson("/api/customer-contracts/{$contractId}/cancel", [
+            'reason' => 'Customer cancelled the connection before installation.',
+            'materials_received_confirmed' => true,
+            'refund_posted_payments' => true,
+            'refund_accounting_account_id' => $account->id,
+            'refunded_at' => '2026-07-28',
+            'refund_reference' => 'CONTRACT-RETURN-001',
+        ])->assertStatus(202)
+            ->assertJsonPath('data.status', 'pending')
+            ->assertJsonCount(1, 'data.items')
+            ->json('data.id');
+
+        $this->assertEquals(6, (float) $stock->fresh()->quantity);
+        $this->assertEquals(10400, (float) $account->fresh()->current_balance);
+        $this->assertDatabaseHas('customer_contracts', ['id' => $contractId, 'status' => 'installation_pending']);
+        $this->assertDatabaseHas('inventory_requests', ['id' => $contractMaterialId, 'return_status' => 'pending_approval']);
+        $this->assertDatabaseHas('inventory_requests', ['id' => $separateSaleId, 'return_status' => 'not_required']);
+
+        $notification = $admin->fresh()->unreadNotifications()->first();
+        $this->assertNotNull($notification);
+        $this->assertSame('contract_cancellation_submitted', $notification->data['event']);
+        $this->assertSame($cancellationId, $notification->data['contract_cancellation_request_id']);
+
+        $this->postJson("/api/contract-cancellation-requests/{$cancellationId}/resolve", [
+            'status' => 'approved',
+        ])->assertForbidden();
+
+        Sanctum::actingAs($admin);
+        $this->postJson("/api/contract-cancellation-requests/{$cancellationId}/resolve", [
+            'status' => 'approved',
+            'resolution_notes' => 'Materials counted and received in Main Warehouse.',
+        ])->assertOk()
+            ->assertJsonPath('data.status', 'approved')
+            ->assertJsonPath('data.contract.status', 'cancelled');
+
+        $this->assertEquals(9, (float) $stock->fresh()->quantity);
+        $this->assertEquals(10000, (float) $account->fresh()->current_balance);
+        $this->assertDatabaseHas('inventory_requests', [
+            'id' => $contractMaterialId,
+            'return_status' => 'returned',
+            'payment_status' => 'refunded',
+        ]);
+        $this->assertDatabaseHas('inventory_requests', [
+            'id' => $separateSaleId,
+            'return_status' => 'not_required',
+            'payment_status' => 'unpaid',
+        ]);
+        $this->assertDatabaseHas('inventory_transactions', [
+            'inventory_item_id' => $stock->id,
+            'type' => 'return',
+            'quantity' => 3,
+            'reference_id' => $cancellationId,
+        ]);
+        $this->assertDatabaseHas('accounting_transactions', [
+            'source_type' => 'inventory_request_cogs',
+            'source_id' => $contractMaterialId,
+            'status' => 'cancelled',
+        ]);
+        $this->assertDatabaseHas('accounting_transactions', [
+            'source_type' => 'inventory_request_cogs',
+            'source_id' => $separateSaleId,
+            'status' => 'approved',
+        ]);
+        $this->assertDatabaseHas('invoices', [
+            'id' => InventoryRequest::query()->findOrFail($contractMaterialId)->invoice_id,
+            'status' => 'cancelled',
+        ]);
+        $this->assertDatabaseHas('invoices', [
+            'id' => InventoryRequest::query()->findOrFail($separateSaleId)->invoice_id,
+            'status' => 'unpaid',
+        ]);
+
+        $this->postJson("/api/contract-cancellation-requests/{$cancellationId}/resolve", [
+            'status' => 'approved',
+        ])->assertUnprocessable();
+        $this->assertEquals(9, (float) $stock->fresh()->quantity);
     }
 
     public function test_warehouse_explorer_returns_stock_metrics_products_and_movements(): void
@@ -469,6 +769,10 @@ class InventoryWorkflowTest extends TestCase
             'current_balance' => 10000,
             'status' => 'active',
         ]);
+        PaymentMethod::query()->firstOrCreate(
+            ['code' => 'cash'],
+            ['name' => 'Cash', 'status' => 'active'],
+        );
 
         return [$warehouse, $supplier, $good, $account];
     }

@@ -4,7 +4,6 @@ namespace App\Notifications;
 
 use App\Models\InventoryRequest;
 use Illuminate\Bus\Queueable;
-use Illuminate\Notifications\Messages\MailMessage;
 use Illuminate\Notifications\Notification;
 
 class InventoryRequestSubmitted extends Notification
@@ -25,11 +24,16 @@ class InventoryRequestSubmitted extends Notification
 
     public function toArray($notifiable): array
     {
+        $label = $this->request->type === 'purchase' ? 'Purchase' : 'Issue';
+
         return [
-            'title' => ucfirst($this->request->type) . ' Request Submitted',
-            'message' => "New {$this->request->type} request {$this->request->request_number} submitted for approval",
+            'title' => "{$label} awaiting approval",
+            'message' => "{$this->request->request_number} was submitted and needs admin approval.",
             'type' => 'inventory_request',
-            'request_id' => $this->request->request_number,
+            'event' => 'inventory_request_submitted',
+            'inventory_request_id' => $this->request->id,
+            'request_id' => $this->request->id,
+            'request_number' => $this->request->request_number,
             'href' => "/dashboard/inventory-manager?view={$this->request->type}",
         ];
     }

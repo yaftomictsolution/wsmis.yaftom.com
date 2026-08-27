@@ -33,7 +33,8 @@ class FullSystemDemoSeederTest extends TestCase
         $admin = User::query()->where('email', 'admin@waternet.local')->firstOrFail();
         Sanctum::actingAs($admin);
 
-        $response = $this->getJson('/api/reports/operational?type=all&from=2026-04-01&to=2026-07-31')
+        $reportEnd = max('2026-07-31', now()->toDateString());
+        $response = $this->getJson("/api/reports/operational?type=all&from=2026-04-01&to={$reportEnd}")
             ->assertOk();
         $response->assertJsonPath('data.summary.total_customers', Customer::query()->count());
         $response->assertJsonPath('data.summary.inventory_items', InventoryItem::query()->count());
@@ -41,7 +42,8 @@ class FullSystemDemoSeederTest extends TestCase
             round((float) AccountingTransaction::query()
                 ->where('status', 'approved')
                 ->where('type', 'income')
-                ->whereBetween('transaction_date', ['2026-04-01', '2026-07-31'])
+                ->whereDate('transaction_date', '>=', '2026-04-01')
+                ->whereDate('transaction_date', '<=', $reportEnd)
                 ->sum('amount'), 2),
             (float) $response->json('data.summary.revenue'),
         );

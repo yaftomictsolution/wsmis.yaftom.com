@@ -25,11 +25,15 @@ class InventoryRequestApproved extends Notification
     public function toArray($notifiable): array
     {
         $status = $this->request->status;
+
         return [
-            'title' => 'Request ' . ucfirst($status),
-            'message' => "Your {$this->request->type} request {$this->request->request_number} has been {$status}",
+            'title' => 'Request '.ucfirst($status),
+            'message' => "Your {$this->request->type} request {$this->request->request_number} has been {$status}.",
             'type' => 'inventory_request_update',
-            'request_id' => $this->request->request_number,
+            'event' => 'inventory_request_resolved',
+            'inventory_request_id' => $this->request->id,
+            'request_id' => $this->request->id,
+            'request_number' => $this->request->request_number,
             'href' => "/dashboard/inventory-manager?view={$this->request->type}",
         ];
     }

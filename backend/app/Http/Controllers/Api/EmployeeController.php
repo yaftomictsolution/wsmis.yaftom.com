@@ -277,10 +277,10 @@ class EmployeeController extends Controller
             'status' => ['required', Rule::in(['active', 'on_leave', 'suspended', 'terminated'])],
             'notes' => ['nullable', 'string'],
             'login_enabled' => ['sometimes', 'boolean'],
-            'login_password' => ['nullable', Rule::requiredIf($loginEnabled && ! $employee?->user_id), 'string', 'min:8', 'confirmed'],
-            'login_password_confirmation' => ['nullable', 'string', 'min:8'],
-            'login_role' => ['nullable', Rule::requiredIf($loginEnabled), 'string', Rule::exists('roles', 'name')->where('guard_name', 'web')],
-            'login_status' => ['nullable', Rule::requiredIf($loginEnabled), Rule::in(['active', 'inactive'])],
+            'login_password' => [Rule::excludeIf(! $loginEnabled), 'nullable', Rule::requiredIf(! $employee?->user_id), 'string', 'min:8', 'confirmed'],
+            'login_password_confirmation' => [Rule::excludeIf(! $loginEnabled), 'nullable', 'string', 'min:8'],
+            'login_role' => [Rule::excludeIf(! $loginEnabled), 'nullable', 'required', 'string', Rule::exists('roles', 'name')->where('guard_name', 'web')],
+            'login_status' => [Rule::excludeIf(! $loginEnabled), 'nullable', 'required', Rule::in(['active', 'inactive'])],
         ]);
     }
 

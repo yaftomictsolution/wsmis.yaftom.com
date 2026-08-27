@@ -6,6 +6,7 @@ use App\Http\Controllers\Api\Concerns\AuthorizesHrRequests;
 use App\Http\Controllers\Controller;
 use App\Models\AttendanceRecord;
 use App\Models\Employee;
+use App\Models\PayrollItem;
 use App\Services\AttendanceService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -61,6 +62,7 @@ class AttendanceController extends Controller
     {
         $this->authorizeHrView($request);
         abort_if($attendanceRecord->source === 'leave', 422, 'Leave attendance must be changed from the leave request.');
+        $this->ensureNotUsedByPayroll($attendanceRecord, 'changed');
         $data = $this->validated($request, $attendanceRecord);
         $employee = Employee::query()->findOrFail($data['employee_id']);
         $this->ensureEmploymentDate($employee, $data['attendance_date']);
@@ -80,8 +82,12 @@ class AttendanceController extends Controller
     public function destroy(Request $request, AttendanceRecord $attendanceRecord): JsonResponse
     {
         $this->authorizeHrView($request);
-        abort_unless(in_array($attendanceRecord->approval_status, ['pending', 'rejected'], true), 422, 'Only pending or rejected attendance can be deleted.');
         abort_if($attendanceRecord->source === 'leave', 422, 'Leave attendance must be changed from the leave request.');
+        abort_unless(in_array($attendanceRecord->approval_status, ['pending', 'rejected', 'approved'], true), 422, 'This attendance record cannot be deleted.');
+        if ($attendanceRecord->approval_status === 'approved') {
+            $this->authorizeHrApproval($request);
+        }
+        $this->ensureNotUsedByPayroll($attendanceRecord, 'deleted');
         $attendanceRecord->delete();
 
         return response()->json(['message' => 'Attendance record deleted.']);
@@ -187,6 +193,27 @@ class AttendanceController extends Controller
         if ($employee->termination_date && $date > $employee->termination_date->toDateString()) {
             throw ValidationException::withMessages([
                 'attendance_date' => ["Attendance cannot be recorded after the employee termination date ({$employee->termination_date->toDateString()})."],
+            ]);
+        }
+    }
+
+    private function ensureNotUsedByPayroll(AttendanceRecord $attendanceRecord, string $action): void
+    {
+        $attendanceDate = $attendanceRecord->attendance_date->toDateString();
+        $payrollItem = PayrollItem::query()
+            ->with('payrollRun:id,payroll_number')
+            ->where('employee_id', $attendanceRecord->employee_id)
+            ->whereHas('payrollRun', fn ($query) => $query
+                ->whereDate('period_start', '<=', $attendanceDate)
+                ->whereDate('period_end', '>=', $attendanceDate)
+                ->where('status', '!=', 'cancelled'))
+            ->first();
+
+        if ($payrollItem) {
+            throw ValidationException::withMessages([
+                'attendance' => [
+                    "Attendance for {$attendanceDate} is used by payroll {$payrollItem->payrollRun->payroll_number} and cannot be {$action}. Resolve or cancel that payroll first.",
+                ],
             ]);
         }
     }

@@ -14,6 +14,7 @@ class ShareholderController extends Controller
     public function index(Request $request): JsonResponse
     {
         $this->authorizeManage($request);
+
         return response()->json([
             'data' => Shareholder::query()->withSum(['distributionItems as entitled_amount' => fn ($query) => $query->whereHas('distribution', fn ($distribution) => $distribution->whereIn('status', ['approved', 'partially_paid', 'paid']))], 'entitlement_amount')->withSum('distributionItems as paid_amount', 'paid_amount')->orderBy('name')->get(),
             'ownership_total' => (float) Shareholder::query()->where('status', 'active')->sum('ownership_percentage'),
@@ -51,17 +52,22 @@ class ShareholderController extends Controller
 
     private function validateShareholder(Request $request): array
     {
-        return $request->validate([
+        $data = $request->validate([
             'name' => ['required', 'string', 'max:255'],
+            'shareholder_type' => ['nullable', Rule::in(['individual', 'company', 'organization'])],
             'father_name' => ['nullable', 'string', 'max:255'],
             'phone' => ['nullable', 'string', 'max:100'],
             'email' => ['nullable', 'email', 'max:255'],
             'investment_amount' => ['nullable', 'numeric', 'min:0'],
             'ownership_percentage' => ['required', 'numeric', 'gt:0', 'lte:100'],
-            'joined_on' => ['nullable', 'date'],
+            'joined_on' => ['nullable', 'date', 'before_or_equal:today'],
             'status' => ['required', Rule::in(['active', 'inactive'])],
             'notes' => ['nullable', 'string'],
         ]);
+
+        $data['shareholder_type'] ??= 'individual';
+
+        return $data;
     }
 
     private function ensureOwnershipLimit(float $percentage, ?int $exceptId = null): void

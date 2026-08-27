@@ -3,6 +3,8 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\AccountingAccount;
+use App\Models\Customer;
 use App\Models\InventoryRequest;
 use App\Models\User;
 use App\Notifications\InventoryRequestApproved;
@@ -15,8 +17,30 @@ use Illuminate\Validation\Rule;
 
 class InventoryRequestController extends Controller
 {
-    public function __construct(private readonly InventoryRequestWorkflowService $workflow)
+    public function __construct(private readonly InventoryRequestWorkflowService $workflow) {}
+
+    public function purchaseAccounts(Request $request): JsonResponse
     {
+        $user = $request->user();
+        abort_unless(
+            $user?->hasAnyRole(['Warehouse Officer', 'Accountant', 'Manager', 'Admin', 'Super Admin'])
+                || $user?->can('inventory.create')
+                || $user?->can('accounting.create')
+                || $user?->can('expenses.create'),
+            403,
+            'You cannot access purchase payment accounts.',
+        );
+
+        return response()
+            ->json([
+                'data' => AccountingAccount::query()
+                    ->where('status', 'active')
+                    ->orderBy('type')
+                    ->orderBy('name')
+                    ->get(['id', 'name', 'code', 'type', 'current_balance', 'status']),
+            ])
+            ->header('Cache-Control', 'no-store, no-cache, must-revalidate, private')
+            ->header('Pragma', 'no-cache');
     }
 
     public function index(Request $request): JsonResponse
@@ -40,6 +64,7 @@ class InventoryRequestController extends Controller
         $isPurchase = $type === 'purchase';
         $isCustomerIssue = $type === 'issue' && $issueType === 'customer';
         $isInternalIssue = $type === 'issue' && $issueType === 'internal';
+        $isContractMaterial = $isCustomerIssue && $request->input('issue_purpose') === 'contract_material';
         $initialPaymentAmount = (float) $request->input('amount_paid', 0);
         if ($isCustomerIssue && $initialPaymentAmount > 0.005) {
             $user = $request->user();
@@ -54,6 +79,11 @@ class InventoryRequestController extends Controller
         $validated = $request->validate([
             'type' => ['required', Rule::in(['purchase', 'issue'])],
             'issue_type' => [Rule::requiredIf($type === 'issue'), 'nullable', Rule::in(['internal', 'customer'])],
+            'issue_purpose' => [
+                'sometimes',
+                'nullable',
+                Rule::in(['separate_sale', 'contract_material']),
+            ],
             'supplier_id' => [
                 Rule::requiredIf($isPurchase),
                 'nullable',
@@ -64,7 +94,13 @@ class InventoryRequestController extends Controller
                 Rule::requiredIf($isCustomerIssue),
                 'nullable',
                 'integer',
-                Rule::exists('customers', 'id')->where('status', 'active'),
+                Rule::exists('customers', 'id')->whereIn('status', Customer::INVENTORY_SALE_ELIGIBLE_STATUSES),
+            ],
+            'customer_contract_id' => [
+                Rule::requiredIf($isContractMaterial),
+                'nullable',
+                'integer',
+                'exists:customer_contracts,id',
             ],
             'department_id' => [
                 Rule::requiredIf($isInternalIssue),
@@ -73,13 +109,13 @@ class InventoryRequestController extends Controller
                 Rule::exists('departments', 'id')->where('status', 'active'),
             ],
             'accounting_account_id' => [
-                Rule::requiredIf($isPurchase || ($isCustomerIssue && $initialPaymentAmount > 0.005)),
+                Rule::requiredIf(($isPurchase || $isCustomerIssue) && $initialPaymentAmount > 0.005),
                 'nullable',
                 'integer',
                 Rule::exists('accounting_accounts', 'id')->where('status', 'active'),
             ],
             'payment_method_id' => [
-                Rule::requiredIf($isCustomerIssue && $initialPaymentAmount > 0.005),
+                Rule::requiredIf(($isPurchase || $isCustomerIssue) && $initialPaymentAmount > 0.005),
                 'nullable',
                 'integer',
                 Rule::exists('payment_methods', 'id')->where('status', 'active'),
@@ -119,8 +155,8 @@ class InventoryRequestController extends Controller
 
         $inventoryRequest = $this->workflow->submit($validated, $request->user());
         $admins = User::query()
+            ->where('status', 'active')
             ->whereHas('roles', fn ($query) => $query->whereIn('name', ['Admin', 'Super Admin']))
-            ->where('id', '!=', $request->user()->id)
             ->get();
         if ($admins->isNotEmpty()) {
             Notification::send($admins, new InventoryRequestSubmitted($inventoryRequest));
@@ -158,6 +194,42 @@ class InventoryRequestController extends Controller
         ]);
     }
 
+    public function pay(Request $request, InventoryRequest $inventoryRequest): JsonResponse
+    {
+        $user = $request->user();
+        abort_unless(
+            $user?->hasAnyRole(['Accountant', 'Manager', 'Admin', 'Super Admin'])
+                || $user?->can('accounting.create')
+                || $user?->can('expenses.create'),
+            403,
+            'You cannot record supplier payments.',
+        );
+
+        $validated = $request->validate([
+            'amount' => ['required', 'numeric', 'gt:0'],
+            'payment_method_id' => [
+                'required',
+                'integer',
+                Rule::exists('payment_methods', 'id')->where('status', 'active'),
+            ],
+            'accounting_account_id' => [
+                'required',
+                'integer',
+                Rule::exists('accounting_accounts', 'id')->where('status', 'active'),
+            ],
+            'paid_at' => ['required', 'date', 'before_or_equal:today'],
+            'reference' => ['nullable', 'string', 'max:255'],
+            'notes' => ['nullable', 'string', 'max:2000'],
+        ]);
+
+        $result = $this->workflow->recordPurchasePayment($inventoryRequest, $validated, $user);
+
+        return response()->json([
+            'message' => 'Supplier payment recorded.',
+            'data' => $result,
+        ], 201);
+    }
+
     public function show(InventoryRequest $inventoryRequest): JsonResponse
     {
         return response()->json([
@@ -172,9 +244,13 @@ class InventoryRequestController extends Controller
             'items.inventoryItem.warehouse',
             'supplier',
             'customer',
+            'contract:id,customer_id,contract_number,status',
             'department',
             'account',
             'paymentMethod',
+            'purchasePayments.account',
+            'purchasePayments.paymentMethod',
+            'purchasePayments.recorder',
             'invoice.items.category',
             'invoice.allocations.payment.paymentMethod',
             'invoice.allocations.payment.account',
@@ -182,6 +258,7 @@ class InventoryRequestController extends Controller
             'warehouse',
             'requester',
             'approver',
+            'returner:id,name',
         ];
     }
 }

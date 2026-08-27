@@ -1,0 +1,33 @@
+.agents/
+.codex/
+test-results/
+playwright-report/
+
+*.log
+*.tsbuildinfo
+.DS_Store
+Thumbs.db
+
+# Laravel / backend secrets and generated files
+backend/.env
+backend/.env.*
+!backend/.env.example
+backend/vendor/
+backend/public/build/
+backend/public/hot
+backend/public/storage/
+backend/storage/*.key
+backend/storage/logs/
+backend/bootstrap/cache/*.php
+backend/database/*.sql
+!backend/database/wsmis.sql
+
+# Next.js / frontend secrets and generated files
+frontend/.env
+frontend/.env.*
+!frontend/.env.example
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/build/
+frontend/.codex-*.png

@@ -36,4 +36,9 @@ class ServiceArea extends Model
     {
         return $this->hasMany(Customer::class);
     }
+
+    public function mosques(): HasMany
+    {
+        return $this->hasMany(ServiceAreaMosque::class)->orderBy('name');
+    }
 }

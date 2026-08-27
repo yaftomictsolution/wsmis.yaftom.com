@@ -9,9 +9,11 @@ use App\Models\PaymentMethod;
 use App\Services\CustomerContractWorkflowService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class CustomerController extends Controller
 {
@@ -29,16 +31,22 @@ class CustomerController extends Controller
     {
         return response()->json(['data' => Customer::query()
             ->with([
-                'serviceArea:id,name',
-                'meterAssignments.meter:id,meter_number,status',
-                'meterAssignments.seals.sealer:id,name',
-                'meterAssignments.seals.remover:id,name',
-                'latestContract.submitter:id,name',
-                'latestContract.confirmer:id,name',
-                'latestContract.approver:id,name',
-                'latestContract.rejector:id,name',
-                'latestContract.deposits.paymentMethod:id,name,code',
-                'latestContract.deposits.account:id,name,code,type,current_balance',
+                'serviceArea:id,name,mosque_name,district,street_block_village',
+                'serviceArea.mosques:id,service_area_id,name,status,notes',
+                'serviceAreaMosque:id,service_area_id,name,status,notes',
+                'latestContract' => fn ($query) => $query->select([
+                    'customer_contracts.id',
+                    'customer_contracts.customer_id',
+                    'customer_contracts.contract_number',
+                    'customer_contracts.subscription_date',
+                    'customer_contracts.meter_size',
+                    'customer_contracts.connection_fee',
+                    'customer_contracts.meter_fee',
+                    'customer_contracts.discount_amount',
+                    'customer_contracts.net_amount',
+                    'customer_contracts.remaining_amount',
+                    'customer_contracts.status',
+                ]),
             ])
             ->withCount('documentFiles')
             ->latest('id')->get()]);
@@ -47,18 +55,22 @@ class CustomerController extends Controller
     public function store(Request $request): JsonResponse
     {
         $data = $this->validateCustomer($request);
-        $customer = Customer::query()->create(array_merge($data, [
-            'status' => 'registered',
-            'opening_balance' => 0,
-            'current_balance' => 0,
-            'connection_fee' => 0,
-            'meter_fee' => 0,
-            'agreement_discount_amount' => 0,
-            'agreement_paid_amount' => 0,
-            'agreement_remaining_amount' => 0,
-            'agreement_status' => 'draft',
-        ]));
-        $this->ensureSubscriptionCode($customer);
+        $customer = DB::transaction(function () use ($data): Customer {
+            $customer = Customer::query()->create(array_merge($data, [
+                'status' => 'registered',
+                'opening_balance' => 0,
+                'current_balance' => 0,
+                'connection_fee' => 0,
+                'meter_fee' => 0,
+                'agreement_discount_amount' => 0,
+                'agreement_paid_amount' => 0,
+                'agreement_remaining_amount' => 0,
+                'agreement_status' => 'draft',
+            ]));
+            $this->ensureSubscriptionCode($customer);
+
+            return $customer->fresh();
+        });
 
         return response()->json(['data' => $this->customerResponse($customer)], 201);
     }
@@ -70,8 +82,79 @@ class CustomerController extends Controller
 
     public function update(Request $request, Customer $customer): JsonResponse
     {
-        $customer->update($this->validateCustomer($request, true));
+        $data = $this->validateCustomer($request, true);
+        if (array_key_exists('service_area_id', $data)
+            && (int) $data['service_area_id'] !== (int) $customer->service_area_id
+            && ! array_key_exists('service_area_mosque_id', $data)) {
+            $data['service_area_mosque_id'] = null;
+        }
+
+        $customer->update($data);
         $this->ensureSubscriptionCode($customer);
+
+        return response()->json(['data' => $this->customerResponse($customer->fresh())]);
+    }
+
+    public function storePhoto(Request $request, Customer $customer): JsonResponse
+    {
+        $data = $request->validate([
+            'photo' => ['required', 'file', 'mimetypes:image/jpeg,image/png,image/webp', 'max:5120'],
+        ], [
+            'photo.required' => 'Capture or select a customer photo.',
+            'photo.mimetypes' => 'The customer photo must be a JPG, PNG, or WebP image.',
+            'photo.max' => 'The customer photo may not be larger than 5 MB.',
+        ]);
+
+        $photo = $data['photo'];
+        $newPath = $photo->store("customers/{$customer->id}/photo", 'local');
+        $oldPath = $customer->photo_path;
+
+        try {
+            $customer->forceFill([
+                'photo_path' => $newPath,
+                'photo_original_name' => $photo->getClientOriginalName(),
+                'photo_mime_type' => $photo->getMimeType(),
+                'photo_size' => $photo->getSize(),
+            ])->save();
+        } catch (\Throwable $exception) {
+            Storage::disk('local')->delete($newPath);
+            throw $exception;
+        }
+
+        if ($oldPath && $oldPath !== $newPath) {
+            Storage::disk('local')->delete($oldPath);
+        }
+
+        return response()->json(['data' => $this->customerResponse($customer->fresh())]);
+    }
+
+    public function photo(Customer $customer): StreamedResponse
+    {
+        abort_unless($customer->photo_path && Storage::disk('local')->exists($customer->photo_path), 404, 'Customer photo not found.');
+
+        return Storage::disk('local')->response(
+            $customer->photo_path,
+            $customer->photo_original_name ?: 'customer-photo.jpg',
+            [
+                'Content-Type' => $customer->photo_mime_type ?: 'image/jpeg',
+                'Cache-Control' => 'private, max-age=3600',
+            ],
+            'inline',
+        );
+    }
+
+    public function destroyPhoto(Customer $customer): JsonResponse
+    {
+        if ($customer->photo_path) {
+            Storage::disk('local')->delete($customer->photo_path);
+        }
+
+        $customer->forceFill([
+            'photo_path' => null,
+            'photo_original_name' => null,
+            'photo_mime_type' => null,
+            'photo_size' => null,
+        ])->save();
 
         return response()->json(['data' => $this->customerResponse($customer->fresh())]);
     }
@@ -92,6 +175,9 @@ class CustomerController extends Controller
         $customer->documentFiles()->each(function ($document): void {
             Storage::disk('local')->delete($document->path);
         });
+        if ($customer->photo_path) {
+            Storage::disk('local')->delete($customer->photo_path);
+        }
         $customer->delete();
 
         return response()->json(['message' => 'Customer deleted.']);
@@ -103,10 +189,15 @@ class CustomerController extends Controller
         $required = $partial ? 'sometimes' : 'required';
         $customer = $request->route('customer');
         $customerId = $customer instanceof Customer ? $customer->id : null;
+        $serviceAreaId = $request->input('service_area_id', $customer instanceof Customer ? $customer->service_area_id : null);
 
         $data = $request->validate([
             'service_area_id' => [$required, 'integer', 'exists:service_areas,id'],
-            'subscription_code' => ['nullable', 'string', 'max:100', Rule::unique('customers', 'subscription_code')->ignore($customerId)],
+            'service_area_mosque_id' => [
+                'nullable',
+                'integer',
+                Rule::exists('service_area_mosques', 'id')->where('service_area_id', $serviceAreaId),
+            ],
             'name' => [$required, 'string', 'min:2', 'max:255'],
             'last_name' => ['nullable', 'string', 'min:2', 'max:255'],
             'father_name' => [$required, 'string', 'min:2', 'max:255'],
@@ -134,6 +225,7 @@ class CustomerController extends Controller
             'tazkira_number.unique' => 'This Tazkira number is already registered to another customer.',
             'house_number.required' => 'Enter the customer house number.',
             'service_area_id.required' => 'Select the customer service area.',
+            'service_area_mosque_id.exists' => 'Select a mosque that belongs to the customer service area.',
         ]);
 
         $identity = array_merge($customer instanceof Customer ? $customer->only([
@@ -173,7 +265,7 @@ class CustomerController extends Controller
     {
         $normalized = [];
 
-        foreach (['subscription_code', 'name', 'last_name', 'father_name', 'grandfather_name', 'house_number', 'nearest_house_number', 'street_number', 'original_residence', 'current_residence'] as $field) {
+        foreach (['name', 'last_name', 'father_name', 'grandfather_name', 'house_number', 'nearest_house_number', 'street_number', 'original_residence', 'current_residence'] as $field) {
             if (! $request->exists($field)) {
                 continue;
             }
@@ -225,7 +317,9 @@ class CustomerController extends Controller
     private function customerResponse(Customer $customer): Customer
     {
         return $customer->load([
-            'serviceArea:id,name',
+            'serviceArea:id,name,mosque_name,district,street_block_village',
+            'serviceArea.mosques:id,service_area_id,name,status,notes',
+            'serviceAreaMosque:id,service_area_id,name,status,notes',
             'meterAssignments.meter:id,meter_number,status',
             'meterAssignments.installer:id,name',
             'meterAssignments.seals.sealer:id,name',
@@ -238,6 +332,7 @@ class CustomerController extends Controller
             'contracts.confirmer:id,name',
             'contracts.approver:id,name',
             'contracts.rejector:id,name',
+            'contracts.discountAuthority:id,authority_number,name,father_name,title,status',
             'contracts.deposits.paymentMethod:id,name,code',
             'contracts.deposits.account:id,name,code,type,current_balance',
             'contracts.deposits.receiver:id,name',
@@ -247,6 +342,7 @@ class CustomerController extends Controller
             'latestContract.confirmer:id,name',
             'latestContract.approver:id,name',
             'latestContract.rejector:id,name',
+            'latestContract.discountAuthority:id,authority_number,name,father_name,title,status',
             'latestContract.deposits.paymentMethod:id,name,code',
             'latestContract.deposits.account:id,name,code,type,current_balance',
             'latestContract.deposits.receiver:id,name',

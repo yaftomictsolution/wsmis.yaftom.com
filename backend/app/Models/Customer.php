@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -12,8 +13,26 @@ class Customer extends Model
 {
     use HasFactory;
 
+    protected $appends = [
+        'has_photo',
+    ];
+
+    protected $hidden = [
+        'photo_path',
+    ];
+
+    public const INVENTORY_SALE_ELIGIBLE_STATUSES = [
+        'registered',
+        'awaiting_approval',
+        'awaiting_installation',
+        'active',
+        'suspended',
+        'disconnected',
+    ];
+
     protected $fillable = [
         'service_area_id',
+        'service_area_mosque_id',
         'subscription_code',
         'subscription_date',
         'name',
@@ -54,6 +73,10 @@ class Customer extends Model
         'current_balance',
         'status',
         'documents',
+        'photo_path',
+        'photo_original_name',
+        'photo_mime_type',
+        'photo_size',
         'notes',
     ];
 
@@ -90,9 +113,24 @@ class Customer extends Model
         return in_array($this->agreement_status, ['approved', 'installation_pending', 'signed', 'active'], true);
     }
 
+    public function canReceiveInventorySale(): bool
+    {
+        return in_array($this->status, self::INVENTORY_SALE_ELIGIBLE_STATUSES, true);
+    }
+
+    protected function hasPhoto(): Attribute
+    {
+        return Attribute::get(fn (): bool => filled($this->photo_path));
+    }
+
     public function serviceArea(): BelongsTo
     {
         return $this->belongsTo(ServiceArea::class);
+    }
+
+    public function serviceAreaMosque(): BelongsTo
+    {
+        return $this->belongsTo(ServiceAreaMosque::class);
     }
 
     public function approver(): BelongsTo

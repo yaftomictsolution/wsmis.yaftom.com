@@ -15,6 +15,7 @@ class PaymentAllocation extends Model
         'invoice_id',
         'customer_charge_id',
         'amount',
+        'discount_amount',
         'refunded_amount',
         'refunded_by',
         'refund_transaction_id',
@@ -28,6 +29,7 @@ class PaymentAllocation extends Model
     {
         return [
             'amount' => 'decimal:2',
+            'discount_amount' => 'decimal:2',
             'refunded_amount' => 'decimal:2',
             'refunded_at' => 'date',
         ];

@@ -7,6 +7,7 @@ use App\Http\Controllers\Api\AssetMaintenanceController;
 use App\Http\Controllers\Api\AssetPurchaseController;
 use App\Http\Controllers\Api\AttendanceController;
 use App\Http\Controllers\Api\AuthController;
+use App\Http\Controllers\Api\AuthorityController;
 use App\Http\Controllers\Api\BillingPeriodController;
 use App\Http\Controllers\Api\BiometricAttendanceController;
 use App\Http\Controllers\Api\CustomerChargeTypeController;
@@ -50,11 +51,11 @@ use App\Http\Controllers\Api\SettingController;
 use App\Http\Controllers\Api\ShareholderController;
 use App\Http\Controllers\Api\ShareholderDistributionController;
 use App\Http\Controllers\Api\SupplierController;
+use App\Http\Controllers\Api\TrainingModeController;
 use App\Http\Controllers\Api\UserController;
 use App\Http\Controllers\Api\WorkScheduleController;
 use Illuminate\Support\Facades\Route;
 
-Route::post('auth/register', [AuthController::class, 'register']);
 Route::post('auth/login', [AuthController::class, 'login']);
 
 Route::middleware('auth:sanctum')->group(function (): void {
@@ -71,6 +72,11 @@ Route::middleware('auth:sanctum')->group(function (): void {
     Route::apiResource('roles', RoleController::class);
     Route::get('settings', [SettingController::class, 'index']);
     Route::put('settings/system-profile', [SettingController::class, 'updateSystemProfile']);
+    Route::get('training-mode', [TrainingModeController::class, 'show']);
+    Route::put('settings/training-mode', [TrainingModeController::class, 'update']);
+    Route::post('settings/training-mode/reset', [TrainingModeController::class, 'reset']);
+    Route::post('settings/training-mode/reset/start', [TrainingModeController::class, 'startReset']);
+    Route::post('settings/training-mode/reset/{operation}/advance', [TrainingModeController::class, 'advanceReset']);
     Route::get('settings/leave', [LeaveSettingsController::class, 'show']);
     Route::put('settings/leave', [LeaveSettingsController::class, 'update']);
     Route::apiResource('payment-methods', PaymentMethodController::class)->except(['show']);
@@ -197,8 +203,13 @@ Route::middleware('auth:sanctum')->group(function (): void {
     Route::post('financial-closings/{financialPeriodClosing}/reopen', [FinancialPeriodClosingController::class, 'reopen']);
     Route::get('financial-reports', [FinancialReportController::class, 'index']);
     Route::get('reports/operational', OperationalReportController::class);
+    Route::get('authorities/options', [AuthorityController::class, 'options']);
+    Route::apiResource('authorities', AuthorityController::class)->except(['show']);
     Route::apiResource('service-areas', ServiceAreaController::class);
     Route::get('customers/collection-options', [CustomerController::class, 'collectionOptions']);
+    Route::get('customers/{customer}/photo', [CustomerController::class, 'photo']);
+    Route::post('customers/{customer}/photo', [CustomerController::class, 'storePhoto']);
+    Route::delete('customers/{customer}/photo', [CustomerController::class, 'destroyPhoto']);
     Route::apiResource('customers', CustomerController::class);
     Route::get('customer-contracts', [CustomerContractController::class, 'index']);
     Route::get('customer-contracts/{customerContract}', [CustomerContractController::class, 'show']);
@@ -206,7 +217,9 @@ Route::middleware('auth:sanctum')->group(function (): void {
     Route::put('customer-contracts/{customerContract}', [CustomerContractController::class, 'update']);
     Route::post('customer-contracts/{customerContract}/printed', [CustomerContractController::class, 'markPrinted']);
     Route::post('customer-contracts/{customerContract}/confirm', [CustomerContractController::class, 'confirm']);
+    Route::get('customer-contracts/{customerContract}/cancellation-preview', [CustomerContractController::class, 'cancellationPreview']);
     Route::post('customer-contracts/{customerContract}/cancel', [CustomerContractController::class, 'cancel']);
+    Route::post('contract-cancellation-requests/{contractCancellationRequest}/resolve', [CustomerContractController::class, 'resolveCancellation']);
     Route::get('customer-deposits', [CustomerDepositController::class, 'index']);
     Route::post('customer-deposits/{customerDeposit}/refund', [CustomerDepositController::class, 'refund']);
     Route::get('service-requests/assigned-to-me', [CustomerOperationsController::class, 'assignedToMe']);
@@ -223,6 +236,7 @@ Route::middleware('auth:sanctum')->group(function (): void {
     Route::delete('customer-documents/{customerDocument}', [CustomerDocumentController::class, 'destroy']);
     Route::post('meters/{meter}/return-to-stock', [MeterController::class, 'returnToStock']);
     Route::apiResource('meters', MeterController::class);
+    Route::get('meter-assignments/assigners', [MeterAssignmentController::class, 'assigners']);
     Route::post('meter-assignments/{meterAssignment}/seals', [MeterAssignmentController::class, 'reseal']);
     Route::get('meter-seals/{meterSeal}/photo', [MeterAssignmentController::class, 'downloadSealPhoto']);
     Route::apiResource('meter-assignments', MeterAssignmentController::class);
@@ -262,7 +276,9 @@ Route::middleware('auth:sanctum')->group(function (): void {
     Route::apiResource('goods', GoodController::class);
 
     // Inventory Requests (for approval workflow)
+    Route::get('inventory-requests/purchase-accounts', [InventoryRequestController::class, 'purchaseAccounts']);
     Route::apiResource('inventory-requests', InventoryRequestController::class)
         ->only(['index', 'store', 'show']);
     Route::post('inventory-requests/{inventoryRequest}/approve', [InventoryRequestController::class, 'approve']);
+    Route::post('inventory-requests/{inventoryRequest}/payments', [InventoryRequestController::class, 'pay']);
 });

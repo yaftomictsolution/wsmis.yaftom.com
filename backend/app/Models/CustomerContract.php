@@ -31,6 +31,7 @@ class CustomerContract extends Model
         'applied_amount',
         'remaining_amount',
         'discount_approved_by',
+        'discount_authority_id',
         'status',
         'printed_at',
         'submitted_at',
@@ -111,6 +112,11 @@ class CustomerContract extends Model
         return $this->belongsTo(User::class, 'rejected_by');
     }
 
+    public function discountAuthority(): BelongsTo
+    {
+        return $this->belongsTo(Authority::class, 'discount_authority_id');
+    }
+
     public function deposits(): HasMany
     {
         return $this->hasMany(CustomerDeposit::class);
@@ -119,6 +125,26 @@ class CustomerContract extends Model
     public function meterAssignments(): HasMany
     {
         return $this->hasMany(MeterAssignment::class);
+    }
+
+    public function cancellationRequests(): HasMany
+    {
+        return $this->hasMany(ContractCancellationRequest::class);
+    }
+
+    public function pendingCancellation(): HasOne
+    {
+        return $this->hasOne(ContractCancellationRequest::class)
+            ->where('status', 'pending')
+            ->latestOfMany();
+    }
+
+    public function contractMaterialIssues(): HasMany
+    {
+        return $this->hasMany(InventoryRequest::class)
+            ->where('type', 'issue')
+            ->where('issue_type', 'customer')
+            ->where('issue_purpose', 'contract_material');
     }
 
     public function charges(): HasMany

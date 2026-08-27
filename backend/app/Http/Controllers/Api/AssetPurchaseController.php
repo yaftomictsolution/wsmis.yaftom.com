@@ -272,6 +272,9 @@ class AssetPurchaseController extends Controller
             'attributes' => ['nullable', 'array'],
             'notes' => ['nullable', 'string', 'max:5000'],
             'attachment' => ['nullable', 'file', 'mimes:pdf,jpg,jpeg,png,doc,docx', 'max:10240'],
+        ], [
+            'supplier_id.exists' => 'The selected supplier no longer exists or is inactive. Refresh the supplier list and select it again.',
+            'service_area_id.exists' => 'The selected service area no longer exists. Refresh the service area list and select it again.',
         ]);
     }
 

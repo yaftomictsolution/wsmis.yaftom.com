@@ -10,82 +10,12 @@ use App\Models\ServiceArea;
 use App\Models\SystemSetting;
 use App\Models\User;
 use Illuminate\Database\Seeder;
-use Spatie\Permission\Models\Permission;
-use Spatie\Permission\Models\Role;
-use Spatie\Permission\PermissionRegistrar;
 
 class FoundationSeeder extends Seeder
 {
     public function run(): void
     {
-        app(PermissionRegistrar::class)->forgetCachedPermissions();
-
-        $modules = [
-            'dashboard', 'users', 'roles', 'settings',
-            'service-areas', 'customers', 'customer-contracts', 'customer-deposits',
-            'meters', 'meter-assignments', 'billing-periods', 'meter-readings', 'invoices', 'payments',
-            'accounting', 'finance-transactions', 'expenses', 'expense-types',
-            'suppliers', 'assets', 'asset-purchases', 'warehouses', 'inventory', 'goods',
-            'employees', 'attendance', 'leave-requests', 'leave-policies', 'work-schedules',
-            'salary-advances', 'employee-adjustments', 'performance-reviews',
-            'payroll', 'payroll-deductions', 'employee-terminations', 'biometric-imports',
-            'shareholders', 'reconciliation', 'financial-closing', 'financial-reports', 'reports',
-        ];
-
-        foreach ($modules as $module) {
-            foreach (['view', 'create', 'update', 'delete'] as $action) {
-                Permission::query()->firstOrCreate([
-                    'name' => "{$module}.{$action}",
-                    'guard_name' => 'web',
-                ]);
-            }
-        }
-
-        $roleModules = [
-            'Manager' => array_values(array_diff($modules, ['roles'])),
-            'Accountant' => [
-                'dashboard', 'customers', 'customer-contracts', 'customer-deposits', 'invoices', 'payments',
-                'accounting', 'finance-transactions', 'expenses', 'expense-types', 'suppliers',
-                'assets', 'asset-purchases', 'payroll', 'salary-advances', 'shareholders',
-                'reconciliation', 'financial-closing', 'financial-reports', 'reports',
-            ],
-            'HR' => [
-                'dashboard', 'users', 'service-areas', 'employees', 'attendance', 'leave-requests',
-                'leave-policies', 'work-schedules', 'salary-advances', 'employee-adjustments',
-                'performance-reviews', 'payroll', 'payroll-deductions', 'employee-terminations',
-                'biometric-imports', 'reports',
-            ],
-            'Meter Reader' => [
-                'dashboard', 'service-areas', 'customers', 'meters', 'meter-assignments',
-                'billing-periods', 'meter-readings',
-            ],
-            'Collector' => [
-                'dashboard', 'customers', 'customer-contracts', 'customer-deposits',
-                'invoices', 'payments',
-            ],
-            'Warehouse Officer' => [
-                'dashboard', 'suppliers', 'warehouses', 'inventory', 'goods', 'assets',
-            ],
-            'Technician' => [
-                'dashboard', 'customers', 'meters', 'meter-assignments', 'assets', 'inventory',
-            ],
-            'Viewer' => ['dashboard', 'reports'],
-        ];
-
-        $adminRole = Role::findOrCreate('Admin', 'web');
-        $adminRole->syncPermissions(Permission::query()->get());
-        foreach ($roleModules as $roleName => $allowedModules) {
-            $role = Role::findOrCreate($roleName, 'web');
-            $role->syncPermissions(
-                Permission::query()
-                    ->where(function ($query) use ($allowedModules): void {
-                        foreach ($allowedModules as $module) {
-                            $query->orWhere('name', 'like', "{$module}.%");
-                        }
-                    })
-                    ->get(),
-            );
-        }
+        $this->call(PermissionCatalogSeeder::class);
 
         $users = [
             ['name' => 'WaterNet Admin', 'email' => 'admin@waternet.local', 'phone' => '0799000000', 'role' => 'Admin'],
@@ -118,6 +48,8 @@ class FoundationSeeder extends Seeder
                 'system_name' => 'Water Supply Management Information System',
                 'currency' => 'AFN',
                 'language' => 'en',
+                'calendar_system' => 'shamsi',
+                'show_gregorian_secondary' => false,
                 'phone' => '0799000000',
                 'address' => 'Kabul, Afghanistan',
             ]],
@@ -195,9 +127,13 @@ class FoundationSeeder extends Seeder
                 'representative_phone' => '0788222333', 'households_count' => 110, 'rate_per_cubic_meter' => 60,
             ],
         ] as $area) {
-            ServiceArea::query()->updateOrCreate(
+            $serviceArea = ServiceArea::query()->updateOrCreate(
                 ['name' => $area['name']],
                 $area + ['status' => 'active'],
+            );
+            $serviceArea->mosques()->updateOrCreate(
+                ['name' => $area['mosque_name']],
+                ['status' => 'active'],
             );
         }
 

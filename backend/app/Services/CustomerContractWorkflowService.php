@@ -67,7 +67,7 @@ class CustomerContractWorkflowService
             $contract = CustomerContract::query()->whereKey($contract->id)->lockForUpdate()->firstOrFail();
             $values = array_merge($contract->only([
                 'subscription_date', 'meter_size', 'connection_fee', 'meter_fee', 'discount_amount',
-                'required_initial_payment', 'discount_approved_by', 'notes',
+                'required_initial_payment', 'discount_approved_by', 'discount_authority_id', 'notes',
             ]), $data);
             $financials = $this->validateFinancials($values);
             $held = $this->heldDepositAmount($contract);
@@ -187,6 +187,7 @@ class CustomerContractWorkflowService
                     foreach ($ordinaryPayments as $payment) {
                         $this->paymentRefunds->refundInvoiceAllocation($payment, $invoice->id, [
                             'refunded_at' => $options['refunded_at'] ?? now()->toDateString(),
+                            'accounting_account_id' => $options['refund_accounting_account_id'] ?? null,
                             'refund_reference' => $options['refund_reference'] ?? null,
                             'refund_reason' => "Contract {$contract->contract_number} cancellation: {$reason}",
                         ], $user);
@@ -478,7 +479,8 @@ class CustomerContractWorkflowService
     {
         $charges = $contract->charges()->where('status', 'posted')->orderBy('id')->get();
         [$connectionAmount, $meterAmount] = $this->discountedChargeAmounts($contract);
-        $issueDate = $contract->confirmed_at?->toDateString()
+        $issueDate = $contract->subscription_date?->toDateString()
+            ?? $contract->confirmed_at?->toDateString()
             ?? $contract->approved_at?->toDateString()
             ?? now()->toDateString();
 
@@ -553,8 +555,8 @@ class CustomerContractWorkflowService
         if ($discount > $gross + 0.005) {
             throw ValidationException::withMessages(['discount_amount' => ['Discount cannot be greater than the contract fees.']]);
         }
-        if ($discount > 0 && blank($data['discount_approved_by'] ?? null)) {
-            throw ValidationException::withMessages(['discount_approved_by' => ['Enter who authorized this discount.']]);
+        if ($discount > 0 && empty($data['discount_authority_id'])) {
+            throw ValidationException::withMessages(['discount_authority_id' => ['Select the authority who granted this discount.']]);
         }
 
         return ['net_amount' => round($net, 2), 'required_initial_payment' => 0];
@@ -630,6 +632,7 @@ class CustomerContractWorkflowService
         return [
             'customer:id,name,last_name,phone,house_number,service_area_id,status',
             'creator:id,name', 'updater:id,name', 'submitter:id,name', 'confirmer:id,name', 'approver:id,name', 'rejector:id,name',
+            'discountAuthority:id,authority_number,name,father_name,title,status',
             'deposits.paymentMethod:id,name,code',
             'deposits.account:id,name,code,type,current_balance',
             'deposits.receiver:id,name', 'deposits.applier:id,name', 'deposits.refunder:id,name',
@@ -639,6 +642,9 @@ class CustomerContractWorkflowService
             'invoice.allocations.payment.receiver:id,name',
             'invoice.allocations.payment.refunder:id,name',
             'meterAssignments.meter:id,meter_number,status',
+            'pendingCancellation.requester:id,name',
+            'pendingCancellation.resolver:id,name',
+            'pendingCancellation.items.warehouse:id,name,code,status',
         ];
     }
 

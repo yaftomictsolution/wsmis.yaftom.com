@@ -33,7 +33,10 @@ class Payment extends Model
         'refund_transaction_id',
         'receipt_number',
         'refund_receipt_number',
+        'idempotency_key',
         'amount',
+        'discount_amount',
+        'discount_authority_id',
         'refunded_amount',
         'paid_at',
         'refunded_at',
@@ -48,6 +51,7 @@ class Payment extends Model
     {
         return [
             'amount' => 'decimal:2',
+            'discount_amount' => 'decimal:2',
             'refunded_amount' => 'decimal:2',
             'paid_at' => 'date',
             'refunded_at' => 'date',
@@ -82,6 +86,11 @@ class Payment extends Model
     public function account(): BelongsTo
     {
         return $this->belongsTo(AccountingAccount::class, 'accounting_account_id');
+    }
+
+    public function discountAuthority(): BelongsTo
+    {
+        return $this->belongsTo(Authority::class, 'discount_authority_id');
     }
 
     public function receiver(): BelongsTo

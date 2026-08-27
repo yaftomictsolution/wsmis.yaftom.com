@@ -5,6 +5,7 @@ namespace Tests\Feature;
 use App\Models\AccountingAccount;
 use App\Models\BillingPeriod;
 use App\Models\Customer;
+use App\Models\Employee;
 use App\Models\Invoice;
 use App\Models\Meter;
 use App\Models\MeterSeal;
@@ -48,7 +49,7 @@ class CustomerContractAccountingTest extends TestCase
 
     public function test_cancelled_contract_remains_in_history_after_a_new_contract_is_created(): void
     {
-        [$manager] = $this->users();
+        [$manager, $admin] = $this->users();
         [$area] = $this->collectionSetup();
         $customer = $this->customer($area, 'Contract History Customer');
         Sanctum::actingAs($manager);
@@ -60,11 +61,11 @@ class CustomerContractAccountingTest extends TestCase
             'meter_fee' => 500,
         ])->assertCreated()->json('data');
 
-        $this->postJson("/api/customer-contracts/{$firstContract['id']}/cancel", [
+        $this->submitAndApproveCancellation($manager, $admin, $firstContract['id'], [
             'reason' => 'Customer requested corrected contract terms.',
-        ])->assertOk()
-            ->assertJsonPath('data.status', 'cancelled')
-            ->assertJsonPath('data.rejection_reason', 'Customer requested corrected contract terms.');
+        ]);
+
+        Sanctum::actingAs($manager);
 
         $secondContract = $this->postJson("/api/customers/{$customer->id}/contracts", [
             'subscription_date' => '2026-07-18',
@@ -80,7 +81,7 @@ class CustomerContractAccountingTest extends TestCase
             ->assertJsonPath('data.customer.contracts.0.status', 'draft')
             ->assertJsonPath('data.customer.contracts.1.id', $firstContract['id'])
             ->assertJsonPath('data.customer.contracts.1.status', 'cancelled')
-            ->assertJsonPath('data.customer.contracts.1.updater.id', $manager->id);
+            ->assertJsonPath('data.customer.contracts.1.updater.id', $admin->id);
     }
 
     public function test_contract_confirmation_creates_invoice_and_notifies_only_admins_without_approval(): void
@@ -219,6 +220,7 @@ class CustomerContractAccountingTest extends TestCase
             'customer_id' => $customer->id,
             'customer_contract_id' => $contractId,
             'meter_id' => $meter->id,
+            'meter_assigner_id' => $manager->employee->id,
             'initial_reading' => 0,
             'installation_date' => '2026-07-19',
             'seal_number' => 'SEAL-PARTIAL-001',
@@ -246,10 +248,11 @@ class CustomerContractAccountingTest extends TestCase
         $this->assertEquals(200, (float) $customer->fresh()->current_balance);
     }
 
-    public function test_paid_contract_can_be_refunded_and_cancelled_atomically(): void
+    public function test_paid_contract_refund_uses_the_selected_account_and_cancels_atomically(): void
     {
-        [$manager] = $this->users();
-        [$area, $cashMethod, $cashAccount] = $this->collectionSetup();
+        [$manager, $admin] = $this->users();
+        [$area, $cashMethod, $cashAccount, $bankAccount] = $this->collectionSetup();
+        $bankAccount->update(['opening_balance' => 1000, 'current_balance' => 1000]);
         $customer = $this->customer($area, 'Refunded Contract Customer');
         Sanctum::actingAs($manager);
 
@@ -273,7 +276,7 @@ class CustomerContractAccountingTest extends TestCase
         $this->postJson("/api/customer-contracts/{$contractId}/cancel", [
             'reason' => 'Customer withdrew before meter installation.',
         ])->assertUnprocessable()
-            ->assertJsonPath('message', 'This contract has posted payments. Confirm the customer refund in the cancellation form before cancelling the contract.');
+            ->assertJsonValidationErrors('refund_posted_payments');
         $this->assertDatabaseHas('payments', ['id' => $paymentId, 'status' => 'posted']);
         $this->assertDatabaseHas('customer_contracts', ['id' => $contractId, 'status' => 'installation_pending']);
 
@@ -281,12 +284,16 @@ class CustomerContractAccountingTest extends TestCase
             'reason' => 'Customer withdrew before meter installation.',
             'refund_posted_payments' => true,
             'refunded_at' => '2026-07-20',
+        ])->assertUnprocessable()
+            ->assertJsonValidationErrors('refund_accounting_account_id');
+
+        $this->submitAndApproveCancellation($manager, $admin, $contractId, [
+            'reason' => 'Customer withdrew before meter installation.',
+            'refund_posted_payments' => true,
+            'refund_accounting_account_id' => $bankAccount->id,
+            'refunded_at' => '2026-07-20',
             'refund_reference' => 'RETURNED-CASH-001',
-        ])->assertOk()
-            ->assertJsonPath('data.status', 'cancelled')
-            ->assertJsonPath('data.invoice.status', 'cancelled')
-            ->assertJsonPath('data.invoice.allocations.0.payment.status', 'refunded')
-            ->assertJsonPath('data.invoice.allocations.0.payment.refunded_amount', '400.00');
+        ]);
 
         $payment = Payment::query()->findOrFail($paymentId);
         $allocation = PaymentAllocation::query()->where('payment_id', $paymentId)->where('invoice_id', $invoice->id)->firstOrFail();
@@ -298,16 +305,18 @@ class CustomerContractAccountingTest extends TestCase
             'source_id' => $allocation->id,
             'type' => 'customer_refund',
             'amount' => 400,
+            'accounting_account_id' => $bankAccount->id,
             'status' => 'approved',
         ]);
-        $this->assertEquals(0, (float) $cashAccount->fresh()->current_balance);
+        $this->assertEquals(400, (float) $cashAccount->fresh()->current_balance);
+        $this->assertEquals(600, (float) $bankAccount->fresh()->current_balance);
         $this->assertEquals(0, (float) $customer->fresh()->current_balance);
         $this->assertEquals('registered', $customer->fresh()->status);
     }
 
     public function test_active_contract_can_be_refunded_cancelled_and_meter_history_closed(): void
     {
-        [$manager] = $this->users();
+        [$manager, $admin] = $this->users();
         [$area, $cashMethod, $cashAccount] = $this->collectionSetup();
         $customer = $this->customer($area, 'Active Cancel Customer');
         Sanctum::actingAs($manager);
@@ -324,6 +333,7 @@ class CustomerContractAccountingTest extends TestCase
             'customer_id' => $customer->id,
             'customer_contract_id' => $contractId,
             'meter_id' => $meter->id,
+            'meter_assigner_id' => $manager->employee->id,
             'initial_reading' => 0,
             'installation_date' => '2026-07-19',
             'seal_number' => 'SEAL-CANCEL-ACTIVE-001',
@@ -340,19 +350,18 @@ class CustomerContractAccountingTest extends TestCase
             'items' => [['type' => 'invoice', 'id' => $invoice->id, 'amount' => 200]],
         ])->assertCreated()->json('data.id');
         $this->assertEquals(200, (float) $cashAccount->fresh()->current_balance);
+        $cashMethod->update(['code' => 'cash-0003']);
         $this->getJson("/api/customers/{$customer->id}/detail")
             ->assertOk()
             ->assertJsonPath('data.customer.latest_contract.invoice.allocations.0.payment.status', 'posted')
             ->assertJsonPath('data.customer.latest_contract.invoice.allocations.0.payment.amount', '200.00');
 
-        $this->postJson("/api/customer-contracts/{$contractId}/cancel", [
+        $this->submitAndApproveCancellation($manager, $admin, $contractId, [
             'reason' => 'Customer moved away after installation.',
             'refund_posted_payments' => true,
             'refunded_at' => '2026-07-20',
             'refund_reference' => 'ACTIVE-REFUND-001',
-        ])->assertOk()
-            ->assertJsonPath('data.status', 'cancelled')
-            ->assertJsonPath('data.invoice.status', 'cancelled');
+        ]);
 
         $this->assertDatabaseHas('payments', [
             'id' => $paymentId,
@@ -368,7 +377,7 @@ class CustomerContractAccountingTest extends TestCase
             'meter_assignment_id' => $assignmentId,
             'seal_number' => 'SEAL-CANCEL-ACTIVE-001',
             'status' => 'removed',
-            'removed_by' => $manager->id,
+            'removed_by' => $admin->id,
         ]);
         $this->assertDatabaseHas('meters', ['id' => $meter->id, 'status' => 'available']);
         $this->assertDatabaseHas('customers', [
@@ -382,7 +391,7 @@ class CustomerContractAccountingTest extends TestCase
 
     public function test_contract_cancellation_partially_refunds_mixed_receipt_without_reversing_other_invoices(): void
     {
-        [$manager] = $this->users();
+        [$manager, $admin] = $this->users();
         [$area, $cashMethod, $cashAccount] = $this->collectionSetup();
         $customer = $this->customer($area, 'Mixed Receipt Customer');
         Sanctum::actingAs($manager);
@@ -399,6 +408,7 @@ class CustomerContractAccountingTest extends TestCase
             'customer_id' => $customer->id,
             'customer_contract_id' => $contractId,
             'meter_id' => $meter->id,
+            'meter_assigner_id' => $manager->employee->id,
             'initial_reading' => 0,
             'installation_date' => '2026-07-19',
             'seal_number' => 'SEAL-MIXED-001',
@@ -442,14 +452,12 @@ class CustomerContractAccountingTest extends TestCase
             ->where('invoice_id', $waterInvoice->id)
             ->firstOrFail();
 
-        $this->postJson("/api/customer-contracts/{$contractId}/cancel", [
+        $this->submitAndApproveCancellation($manager, $admin, $contractId, [
             'reason' => 'Customer cancelled the contract after a mixed receipt was posted.',
             'refund_posted_payments' => true,
             'refunded_at' => '2026-07-21',
             'refund_reference' => 'MIXED-REFUND-001',
-        ])->assertOk()
-            ->assertJsonPath('data.status', 'cancelled')
-            ->assertJsonPath('data.invoice.status', 'cancelled');
+        ]);
 
         $this->assertDatabaseHas('payments', [
             'id' => $paymentId,
@@ -486,6 +494,115 @@ class CustomerContractAccountingTest extends TestCase
         $this->assertEquals(0, (float) $customer->fresh()->current_balance);
     }
 
+    public function test_meter_replacement_generates_one_linked_invoice_and_accepts_partial_payment(): void
+    {
+        [$manager] = $this->users();
+        [$area, $cashMethod, $cashAccount] = $this->collectionSetup();
+        $customer = $this->customer($area, 'Replacement Billing Customer');
+        Sanctum::actingAs($manager);
+
+        $contractId = $this->postJson("/api/customers/{$customer->id}/contracts", [
+            'subscription_date' => '2026-07-19',
+            'connection_fee' => 100,
+            'meter_fee' => 0,
+        ])->assertCreated()->json('data.id');
+        $this->postJson("/api/customer-contracts/{$contractId}/confirm")->assertOk();
+        $contractInvoice = Invoice::query()->where('customer_contract_id', $contractId)->firstOrFail();
+        $this->postJson('/api/payments', [
+            'customer_id' => $customer->id,
+            'payment_method_id' => $cashMethod->id,
+            'accounting_account_id' => $cashAccount->id,
+            'paid_at' => '2026-07-19',
+            'items' => [['type' => 'invoice', 'id' => $contractInvoice->id, 'amount' => 100]],
+        ])->assertCreated();
+
+        $firstMeter = Meter::query()->create(['meter_number' => 'WM-REPLACE-OLD', 'status' => 'available']);
+        $firstAssignmentId = $this->postJson('/api/meter-assignments', [
+            'customer_id' => $customer->id,
+            'customer_contract_id' => $contractId,
+            'meter_id' => $firstMeter->id,
+            'meter_assigner_id' => $manager->employee->id,
+            'initial_reading' => 0,
+            'installation_date' => '2026-07-19',
+            'seal_number' => 'SEAL-REPLACE-OLD',
+        ])->assertCreated()->json('data.id');
+
+        $newMeter = Meter::query()->create(['meter_number' => 'WM-REPLACE-NEW', 'status' => 'available']);
+        $this->postJson('/api/meter-assignments', [
+            'customer_id' => $customer->id,
+            'customer_contract_id' => $contractId,
+            'meter_id' => $newMeter->id,
+            'meter_assigner_id' => $manager->employee->id,
+            'initial_reading' => 0,
+            'installation_date' => '2026-07-20',
+            'seal_number' => 'SEAL-REPLACE-NEW',
+            'previous_meter_disposition' => 'repair',
+            'replacement_fee' => 600,
+            'notes' => 'Old meter stopped recording consumption.',
+        ])->assertCreated()
+            ->assertJsonPath('data.status', 'active')
+            ->assertJsonPath('data.meter.meter_number', 'WM-REPLACE-NEW');
+
+        $previousAssignment = $customer->meterAssignments()->findOrFail($firstAssignmentId);
+        $charge = $previousAssignment->replacementCharge()->firstOrFail();
+        $invoice = Invoice::query()
+            ->where('source_type', 'customer_charge')
+            ->where('source_id', $charge->id)
+            ->firstOrFail();
+
+        $this->assertDatabaseHas('meter_assignments', [
+            'id' => $firstAssignmentId,
+            'status' => 'replaced',
+            'replacement_charge_id' => $charge->id,
+        ]);
+        $this->assertDatabaseHas('customer_charges', [
+            'id' => $charge->id,
+            'customer_id' => $customer->id,
+            'customer_contract_id' => $contractId,
+            'type' => 'replacement_fee',
+            'amount' => 600,
+            'remaining_amount' => 600,
+            'status' => 'posted',
+        ]);
+        $this->assertDatabaseHas('invoices', [
+            'id' => $invoice->id,
+            'invoice_type' => 'service',
+            'total_amount' => 600,
+            'paid_amount' => 0,
+            'remaining_amount' => 600,
+            'status' => 'unpaid',
+        ]);
+        $this->assertSame(1, Invoice::query()->where('source_type', 'customer_charge')->where('source_id', $charge->id)->count());
+        $this->assertEquals(600, (float) $customer->fresh()->current_balance);
+
+        $this->getJson("/api/customers/{$customer->id}/detail")
+            ->assertOk()
+            ->assertJsonPath('data.meter_replacement_history.0.id', $firstAssignmentId)
+            ->assertJsonPath('data.meter_replacement_history.0.replacement_charge.invoice.id', $invoice->id);
+
+        $this->postJson('/api/payments', [
+            'customer_id' => $customer->id,
+            'payment_method_id' => $cashMethod->id,
+            'accounting_account_id' => $cashAccount->id,
+            'paid_at' => '2026-07-21',
+            'items' => [['type' => 'invoice', 'id' => $invoice->id, 'amount' => 250]],
+        ])->assertCreated()->assertJsonPath('data.amount', '250.00');
+
+        $this->assertDatabaseHas('invoices', [
+            'id' => $invoice->id,
+            'paid_amount' => 250,
+            'remaining_amount' => 350,
+            'status' => 'partially_paid',
+        ]);
+        $this->assertDatabaseHas('customer_charges', [
+            'id' => $charge->id,
+            'paid_amount' => 250,
+            'remaining_amount' => 350,
+        ]);
+        $this->assertEquals(350, (float) $cashAccount->fresh()->current_balance);
+        $this->assertEquals(350, (float) $customer->fresh()->current_balance);
+    }
+
     public function test_meter_installation_and_resealing_keep_a_complete_seal_history(): void
     {
         Storage::fake('local');
@@ -506,6 +623,7 @@ class CustomerContractAccountingTest extends TestCase
             'customer_id' => $customer->id,
             'customer_contract_id' => $contractId,
             'meter_id' => $meter->id,
+            'meter_assigner_id' => $manager->employee->id,
             'initial_reading' => 0,
             'installation_date' => '2026-07-19',
             'sealed_at' => '2026-07-19',
@@ -572,14 +690,63 @@ class CustomerContractAccountingTest extends TestCase
         $this->assertDatabaseHas('meter_readings', ['id' => $readingId, 'read_by' => $manager->id]);
     }
 
+    public function test_meter_assigner_employee_can_be_created_with_login_and_is_listed_for_assignments(): void
+    {
+        [$manager] = $this->users();
+        Sanctum::actingAs($manager);
+
+        $employeeId = $this->postJson('/api/employees', [
+            'first_name' => 'Farid',
+            'last_name' => 'Ahmadi',
+            'email' => 'farid.assigner@example.test',
+            'hire_date' => '2026-07-01',
+            'employment_type' => 'permanent',
+            'salary_type' => 'fixed',
+            'base_salary' => 12000,
+            'standard_daily_hours' => 8,
+            'work_start_time' => '08:00',
+            'work_end_time' => '16:00',
+            'work_days' => [1, 2, 3, 4, 5, 6],
+            'status' => 'active',
+            'login_enabled' => true,
+            'login_password' => 'password123',
+            'login_password_confirmation' => 'password123',
+            'login_role' => 'Meter Assigner',
+            'login_status' => 'active',
+        ])->assertCreated()
+            ->assertJsonPath('data.user.roles.0.name', 'Meter Assigner')
+            ->json('data.id');
+
+        $this->getJson('/api/meter-assignments/assigners')
+            ->assertOk()
+            ->assertJsonFragment([
+                'id' => $employeeId,
+                'name' => 'Farid Ahmadi',
+                'email' => 'farid.assigner@example.test',
+            ]);
+    }
+
     private function users(): array
     {
         $managerRole = Role::findOrCreate('Manager', 'web');
         $adminRole = Role::findOrCreate('Admin', 'web');
+        $meterAssignerRole = Role::findOrCreate('Meter Assigner', 'web');
         $manager = User::factory()->create(['status' => 'active']);
         $admin = User::factory()->create(['status' => 'active']);
         $manager->assignRole($managerRole);
+        $manager->assignRole($meterAssignerRole);
         $admin->assignRole($adminRole);
+        Employee::query()->create([
+            'user_id' => $manager->id,
+            'employee_number' => 'EMP-METER-ASSIGNER',
+            'first_name' => $manager->name,
+            'email' => $manager->email,
+            'hire_date' => '2026-01-01',
+            'employment_type' => 'permanent',
+            'salary_type' => 'fixed',
+            'base_salary' => 10000,
+            'status' => 'active',
+        ]);
 
         return [$manager, $admin];
     }
@@ -592,6 +759,39 @@ class CustomerContractAccountingTest extends TestCase
         $bank = AccountingAccount::query()->firstOrCreate(['code' => 'bank_test'], ['name' => 'Bank', 'type' => 'bank', 'opening_balance' => 0, 'current_balance' => 0, 'status' => 'active']);
 
         return [$area, $method, $cash, $bank];
+    }
+
+    private function submitAndApproveCancellation(
+        User $requester,
+        User $admin,
+        int $contractId,
+        array $payload,
+    ): int {
+        if (($payload['refund_posted_payments'] ?? false) && empty($payload['refund_accounting_account_id'])) {
+            $payload['refund_accounting_account_id'] = AccountingAccount::query()
+                ->where('status', 'active')
+                ->orderByDesc('current_balance')
+                ->value('id');
+        }
+        Sanctum::actingAs($requester);
+        $requestId = $this->postJson("/api/customer-contracts/{$contractId}/cancel", $payload)
+            ->assertStatus(202)
+            ->assertJsonPath('data.status', 'pending')
+            ->json('data.id');
+
+        $this->assertDatabaseMissing('customer_contracts', [
+            'id' => $contractId,
+            'status' => 'cancelled',
+        ]);
+
+        Sanctum::actingAs($admin);
+        $this->postJson("/api/contract-cancellation-requests/{$requestId}/resolve", [
+            'status' => 'approved',
+        ])->assertOk()
+            ->assertJsonPath('data.status', 'approved')
+            ->assertJsonPath('data.contract.status', 'cancelled');
+
+        return (int) $requestId;
     }
 
     private function customer(ServiceArea $area, string $name = 'Ahmad Karim'): Customer

@@ -18,13 +18,12 @@ use Illuminate\Validation\ValidationException;
 
 class ShareholderDistributionController extends Controller
 {
-    public function __construct(private readonly AccountingWorkflowService $workflow)
-    {
-    }
+    public function __construct(private readonly AccountingWorkflowService $workflow) {}
 
     public function index(Request $request): JsonResponse
     {
         $this->authorizeCreate($request);
+
         return response()->json(['data' => ShareholderDistribution::with($this->relations())->latest()->get()]);
     }
 
@@ -122,7 +121,7 @@ class ShareholderDistributionController extends Controller
         $this->authorizeApprove($request);
         abort_unless(in_array($shareholderDistribution->status, ['pending_review', 'pending_approval'], true), 422, 'Only pending distributions can be approved.');
         $updates = ['status' => 'approved', 'approved_by' => $request->user()->id, 'approved_at' => now()];
-        if (!$shareholderDistribution->reviewed_by) {
+        if (! $shareholderDistribution->reviewed_by) {
             $updates += ['reviewed_by' => $request->user()->id, 'reviewed_at' => now()];
         }
         $shareholderDistribution->update($updates);
@@ -145,7 +144,7 @@ class ShareholderDistributionController extends Controller
         $this->authorizeCreate($request);
         $data = $request->validate([
             'amount' => ['required', 'numeric', 'gt:0'],
-            'payment_date' => ['required', 'date'],
+            'payment_date' => ['required', 'date', 'before_or_equal:today'],
             'payment_method_id' => ['required', 'integer', 'exists:payment_methods,id'],
             'accounting_account_id' => ['required', 'integer', 'exists:accounting_accounts,id'],
             'receipt_number' => ['nullable', 'string', 'max:255'],

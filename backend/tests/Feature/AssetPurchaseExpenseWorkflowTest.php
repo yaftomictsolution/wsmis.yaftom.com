@@ -107,6 +107,37 @@ class AssetPurchaseExpenseWorkflowTest extends TestCase
             ->assertJsonValidationErrors('asset_code_prefix');
     }
 
+    public function test_asset_purchase_rejects_a_stale_supplier_selection_with_a_clear_message(): void
+    {
+        [$accountant] = $this->financeUsers();
+        [$account, $method, $category] = $this->financeSetup(1000);
+        $supplier = Supplier::query()->create([
+            'name' => 'Removed Supplier',
+            'status' => 'active',
+        ]);
+        $supplierId = $supplier->id;
+        $supplier->delete();
+
+        Sanctum::actingAs($accountant);
+        $this->postJson('/api/asset-purchases', [
+            'asset_code_prefix' => 'GEN-STALE',
+            'name' => 'Backup Generator',
+            'type' => 'generator',
+            'quantity' => 1,
+            'unit_cost' => 100,
+            'supplier_id' => $supplierId,
+            'financial_category_id' => $category->id,
+            'payment_method_id' => $method->id,
+            'accounting_account_id' => $account->id,
+            'purchase_date' => '2026-07-28',
+        ])->assertUnprocessable()
+            ->assertJsonValidationErrors('supplier_id')
+            ->assertJsonPath(
+                'errors.supplier_id.0',
+                'The selected supplier no longer exists or is inactive. Refresh the supplier list and select it again.',
+            );
+    }
+
     public function test_manual_expenses_can_be_edited_or_deleted_before_posting_but_used_types_cannot_be_deleted(): void
     {
         [$accountant, , $admin] = $this->financeUsers();

@@ -44,6 +44,8 @@ class CustomerOperationsController extends Controller
     {
         $customer->load([
             'serviceArea',
+            'serviceArea.mosques',
+            'serviceAreaMosque',
             'contracts' => fn ($query) => $query->latest('id'),
             'contracts.creator:id,name',
             'contracts.updater:id,name',
@@ -51,6 +53,11 @@ class CustomerOperationsController extends Controller
             'contracts.confirmer:id,name',
             'contracts.approver:id,name',
             'contracts.rejector:id,name',
+            'contracts.discountAuthority:id,authority_number,name,father_name,title,status',
+            'contracts.pendingCancellation.requester:id,name',
+            'contracts.pendingCancellation.resolver:id,name',
+            'contracts.pendingCancellation.refundAccount:id,name,code,type,current_balance,status',
+            'contracts.pendingCancellation.items.warehouse:id,name,code,status',
             'contracts.deposits.paymentMethod:id,name,code',
             'contracts.deposits.account:id,name,code,type,current_balance',
             'contracts.deposits.receiver:id,name',
@@ -66,6 +73,11 @@ class CustomerOperationsController extends Controller
             'latestContract.submitter:id,name',
             'latestContract.approver:id,name',
             'latestContract.rejector:id,name',
+            'latestContract.discountAuthority:id,authority_number,name,father_name,title,status',
+            'latestContract.pendingCancellation.requester:id,name',
+            'latestContract.pendingCancellation.resolver:id,name',
+            'latestContract.pendingCancellation.refundAccount:id,name,code,type,current_balance,status',
+            'latestContract.pendingCancellation.items.warehouse:id,name,code,status',
             'latestContract.deposits.paymentMethod:id,name,code',
             'latestContract.deposits.account:id,name,code,type,current_balance',
             'latestContract.deposits.receiver:id,name',
@@ -80,6 +92,9 @@ class CustomerOperationsController extends Controller
             'rejector:id,name',
             'meterAssignments.meter',
             'meterAssignments.contract:id,customer_id,contract_number,status',
+            'meterAssignments.replacementCharge:id,customer_id,customer_contract_id,invoice_id,customer_charge_type_id,title,type,amount,paid_amount,remaining_amount,charge_date,status',
+            'meterAssignments.replacementCharge.chargeType:id,name,code,status,is_system',
+            'meterAssignments.replacementCharge.invoice:id,invoice_number,invoice_type,total_amount,paid_amount,remaining_amount,status,due_date',
             'meterAssignments.installer:id,name',
             'meterAssignments.seals.sealer:id,name',
             'meterAssignments.seals.remover:id,name',
@@ -92,12 +107,12 @@ class CustomerOperationsController extends Controller
             'invoices.contract:id,contract_number,status',
             'invoices.items.category:id,name,type',
             'invoices.payments.paymentMethod:id,name,code',
-            'payments.invoice:id,invoice_number,total_amount,paid_amount,remaining_amount,status',
+            'payments.invoice:id,invoice_number,total_amount,paid_amount,payment_discount_amount,remaining_amount,status',
             'payments.paymentMethod:id,name,code',
             'payments.account:id,name,code,type,current_balance',
             'payments.refunder:id,name',
-            'payments.refundTransaction',
-            'payments.allocations.invoice:id,invoice_number,total_amount,paid_amount,remaining_amount,status',
+            'payments.refundTransaction.account:id,name,code,type,current_balance',
+            'payments.allocations.invoice:id,invoice_number,total_amount,paid_amount,payment_discount_amount,remaining_amount,status',
             'payments.allocations.charge:id,title,amount,paid_amount,remaining_amount,status',
             'payments.receiver:id,name',
             'documentFiles.uploader:id,name',
@@ -148,7 +163,7 @@ class CustomerOperationsController extends Controller
             ],
             'title' => ['required', 'string', 'max:255'],
             'amount' => ['required', 'numeric', 'min:0.01'],
-            'charge_date' => ['required', 'date'],
+            'charge_date' => ['required', 'date', 'before_or_equal:today'],
             'notes' => ['nullable', 'string'],
         ]);
         $chargeType = CustomerChargeType::query()->findOrFail($data['customer_charge_type_id']);
@@ -199,7 +214,7 @@ class CustomerOperationsController extends Controller
             'type' => ['required', Rule::in(['complaint', 'leak', 'meter_problem', 'low_pressure', 'billing_question', 'other'])],
             'priority' => ['required', Rule::in(['low', 'normal', 'high', 'urgent'])],
             'description' => ['required', 'string', 'max:5000'],
-            'requested_at' => ['required', 'date'],
+            'requested_at' => ['required', 'date', 'before_or_equal:today'],
         ]);
 
         $serviceRequest = DB::transaction(function () use ($request, $customer, $data): CustomerServiceRequest {
@@ -275,8 +290,8 @@ class CustomerOperationsController extends Controller
             'reason' => ['nullable', 'string'],
             'fee' => ['nullable', 'numeric', 'min:0'],
             'status' => ['required', Rule::in(['pending', 'completed', 'cancelled'])],
-            'disconnected_at' => ['nullable', 'date', 'required_if:event_type,disconnection'],
-            'reconnected_at' => ['nullable', 'date', 'required_if:event_type,reconnection'],
+            'disconnected_at' => ['nullable', 'date', 'before_or_equal:today', 'required_if:event_type,disconnection'],
+            'reconnected_at' => ['nullable', 'date', 'before_or_equal:today', 'required_if:event_type,reconnection'],
             'notes' => ['nullable', 'string'],
         ]);
 

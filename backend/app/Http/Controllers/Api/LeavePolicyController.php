@@ -7,6 +7,7 @@ use App\Http\Controllers\Controller;
 use App\Models\Employee;
 use App\Models\LeavePolicy;
 use App\Services\LeaveBalanceService;
+use App\Services\LeavePolicyDefaultsService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Validation\Rule;
@@ -15,10 +16,14 @@ class LeavePolicyController extends Controller
 {
     use AuthorizesHrRequests;
 
-    public function __construct(private readonly LeaveBalanceService $balances) {}
+    public function __construct(
+        private readonly LeaveBalanceService $balances,
+        private readonly LeavePolicyDefaultsService $policyDefaults,
+    ) {}
 
     public function index(Request $request): JsonResponse
     {
+        $this->policyDefaults->ensure();
         $year = $request->integer('year', (int) now()->year);
         abort_unless($year >= 2000 && $year <= 2200, 422, 'Select a valid leave balance year.');
         $employees = Employee::query()->whereIn('status', ['active', 'on_leave', 'suspended']);

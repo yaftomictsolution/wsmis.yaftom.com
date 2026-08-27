@@ -14,6 +14,7 @@ class MeterAssignment extends Model
     protected $fillable = [
         'customer_id',
         'customer_contract_id',
+        'replacement_charge_id',
         'meter_id',
         'source_warehouse_id',
         'return_warehouse_id',
@@ -44,6 +45,11 @@ class MeterAssignment extends Model
     public function contract(): BelongsTo
     {
         return $this->belongsTo(CustomerContract::class, 'customer_contract_id');
+    }
+
+    public function replacementCharge(): BelongsTo
+    {
+        return $this->belongsTo(CustomerCharge::class, 'replacement_charge_id');
     }
 
     public function meter(): BelongsTo

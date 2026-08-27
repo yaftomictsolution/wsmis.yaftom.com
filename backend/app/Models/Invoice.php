@@ -7,6 +7,7 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class Invoice extends Model
 {
@@ -29,6 +30,7 @@ class Invoice extends Model
         'water_amount',
         'penalty_amount',
         'discount_amount',
+        'payment_discount_amount',
         'total_amount',
         'paid_amount',
         'remaining_amount',
@@ -47,6 +49,7 @@ class Invoice extends Model
             'water_amount' => 'decimal:2',
             'penalty_amount' => 'decimal:2',
             'discount_amount' => 'decimal:2',
+            'payment_discount_amount' => 'decimal:2',
             'total_amount' => 'decimal:2',
             'paid_amount' => 'decimal:2',
             'remaining_amount' => 'decimal:2',
@@ -81,6 +84,11 @@ class Invoice extends Model
     public function allocations(): HasMany
     {
         return $this->hasMany(PaymentAllocation::class);
+    }
+
+    public function inventoryRequest(): HasOne
+    {
+        return $this->hasOne(InventoryRequest::class, 'invoice_id');
     }
 
     public function payments(): BelongsToMany

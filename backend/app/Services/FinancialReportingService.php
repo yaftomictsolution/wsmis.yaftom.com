@@ -10,6 +10,7 @@ use App\Models\CustomerCharge;
 use App\Models\CustomerDeposit;
 use App\Models\FinancialPeriodClosing;
 use App\Models\Invoice;
+use App\Models\InventoryRequest;
 use App\Models\PayrollRun;
 use App\Models\ShareholderDistribution;
 use Carbon\Carbon;
@@ -18,10 +19,14 @@ class FinancialReportingService
 {
     public function bookBalance(AccountingAccount $account, string $throughDate): float
     {
+        $through = Carbon::parse($throughDate)->endOfDay();
+        $openingBalance = ! $account->created_at || $account->created_at->lte($through)
+            ? (float) $account->opening_balance
+            : 0.0;
         $income = $account->transactions()->where('status', 'approved')->whereIn('type', ['income', 'customer_advance'])->whereDate('transaction_date', '<=', $throughDate)->sum('amount');
         $outflow = $account->transactions()->where('status', 'approved')->whereIn('type', ['expense', 'equity', 'deposit_refund', 'customer_refund'])->whereDate('transaction_date', '<=', $throughDate)->sum('amount');
 
-        return round((float) $account->opening_balance + (float) $income - (float) $outflow, 2);
+        return round($openingBalance + (float) $income - (float) $outflow, 2);
     }
 
     public function periodSnapshot(string $start, string $end): array
@@ -40,6 +45,7 @@ class FinancialReportingService
         $balances = AccountingAccount::query()->where('status', 'active')->get()->mapWithKeys(
             fn (AccountingAccount $account): array => [$account->id => $this->bookBalance($account, $end)],
         );
+        $reconciliation = $this->reconciliationReadiness($end);
 
         return [
             'period_start' => $start,
@@ -63,37 +69,70 @@ class FinancialReportingService
                     ->sum('remaining_amount'),
                 2,
             ),
-            // Retained as zero for historical monthly-closing schema compatibility.
-            'supplier_payables' => 0.0,
+            'supplier_payables' => $this->supplierPayablesAt($end),
             'cash_balance' => round((float) AccountingAccount::query()->whereIn('id', $balances->keys())->whereIn('type', ['cash', 'mobile_money', 'check', 'online'])->get()->sum(fn (AccountingAccount $account): float => (float) ($balances[$account->id] ?? 0)), 2),
             'bank_balance' => round((float) AccountingAccount::query()->whereIn('id', $balances->keys())->where('type', 'bank')->get()->sum(fn (AccountingAccount $account): float => (float) ($balances[$account->id] ?? 0)), 2),
-            'reconciliation_complete' => $this->reconciliationsComplete($end),
+            'reconciliation_complete' => $reconciliation['complete'],
+            'reconciliation_readiness' => $reconciliation,
+        ];
+    }
+
+    public function reconciliationReadiness(string $end): array
+    {
+        $periodEnd = Carbon::parse($end)->toDateString();
+        $periodEndAt = Carbon::parse($periodEnd)->endOfDay();
+        $requiredAccounts = AccountingAccount::query()
+            ->where('status', 'active')
+            ->whereIn('type', ['cash', 'bank', 'mobile_money', 'check', 'online'])
+            ->where(function ($query) use ($periodEnd, $periodEndAt): void {
+                $query->where(function ($openingBalance) use ($periodEndAt): void {
+                    $openingBalance->where('opening_balance', '!=', 0)
+                        ->where('created_at', '<=', $periodEndAt);
+                })
+                    ->orWhereHas('transactions', fn ($transactions) => $transactions
+                        ->where('status', 'approved')
+                        ->whereDate('transaction_date', '<=', $periodEnd));
+            })
+            ->orderBy('type')
+            ->orderBy('name')
+            ->get();
+
+        $reconciliations = AccountReconciliation::query()
+            ->whereIn('accounting_account_id', $requiredAccounts->pluck('id'))
+            ->whereDate('period_end', $periodEnd)
+            ->get()
+            ->keyBy('accounting_account_id');
+
+        $accounts = $requiredAccounts->map(function (AccountingAccount $account) use ($periodEnd, $reconciliations): array {
+            $reconciliation = $reconciliations->get($account->id);
+
+            return [
+                'account_id' => $account->id,
+                'name' => $account->name,
+                'code' => $account->code,
+                'type' => $account->type,
+                'book_balance' => $this->bookBalance($account, $periodEnd),
+                'reconciliation_id' => $reconciliation?->id,
+                'reconciliation_number' => $reconciliation?->reconciliation_number,
+                'status' => $reconciliation?->status ?? 'missing',
+                'difference' => $reconciliation ? (float) $reconciliation->difference : null,
+            ];
+        })->values();
+
+        $approvedCount = $accounts->where('status', 'approved')->count();
+
+        return [
+            'period_end' => $periodEnd,
+            'required_count' => $accounts->count(),
+            'approved_count' => $approvedCount,
+            'complete' => $approvedCount === $accounts->count(),
+            'accounts' => $accounts->all(),
         ];
     }
 
     public function reconciliationsComplete(string $end): bool
     {
-        $required = AccountingAccount::query()
-            ->where('status', 'active')
-            ->whereIn('type', ['cash', 'bank', 'mobile_money', 'check', 'online'])
-            ->where(function ($query) use ($end): void {
-                $query->where('opening_balance', '!=', 0)
-                    ->orWhereHas('transactions', fn ($transactions) => $transactions->where('status', 'approved')->whereDate('transaction_date', '<=', $end));
-            })
-            ->pluck('id');
-
-        if ($required->isEmpty()) {
-            return true;
-        }
-
-        $approved = AccountReconciliation::query()
-            ->whereIn('accounting_account_id', $required)
-            ->whereDate('period_end', $end)
-            ->where('status', 'approved')
-            ->distinct()
-            ->count('accounting_account_id');
-
-        return $approved === $required->count();
+        return $this->reconciliationReadiness($end)['complete'];
     }
 
     public function report(string $from, string $to, ?int $accountId = null): array
@@ -141,12 +180,37 @@ class FinancialReportingService
             ]),
             'ledger' => $transactions,
             'receivables' => Customer::query()->where('current_balance', '>', 0)->with('serviceArea:id,name')->orderByDesc('current_balance')->get(['id', 'name', 'phone', 'service_area_id', 'current_balance']),
-            'supplier_payables' => [],
+            'supplier_payables' => InventoryRequest::query()
+                ->with(['supplier:id,name', 'purchasePayments.account:id,name,code,type', 'purchasePayments.paymentMethod:id,name,code'])
+                ->where('type', 'purchase')
+                ->where('status', 'approved')
+                ->where('remaining_amount', '>', 0)
+                ->whereDate('request_date', '<=', $to)
+                ->latest('request_date')
+                ->get(),
             'payroll' => PayrollRun::query()->with('creator:id,name')->whereDate('payment_date', '>=', $from)->whereDate('payment_date', '<=', $to)->latest('payment_date')->get(),
             'shareholder_distributions' => ShareholderDistribution::query()->with(['closing:id,period_code,period_start,period_end', 'items.shareholder:id,name'])->whereHas('closing', fn ($query) => $query->whereDate('period_end', '>=', $from)->whereDate('period_end', '<=', $to))->latest()->get(),
             'reconciliations' => AccountReconciliation::query()->with('account:id,name,code,type')->whereDate('period_end', '>=', $from)->whereDate('period_end', '<=', $to)->latest('period_end')->get(),
             'closings' => FinancialPeriodClosing::query()->whereDate('period_end', '>=', $from)->whereDate('period_end', '<=', $to)->latest('period_end')->get(),
             'generated_at' => Carbon::now()->toIso8601String(),
         ];
+    }
+
+    private function supplierPayablesAt(string $throughDate): float
+    {
+        return round((float) InventoryRequest::query()
+            ->where('type', 'purchase')
+            ->where('status', 'approved')
+            ->whereDate('request_date', '<=', $throughDate)
+            ->withSum([
+                'purchasePayments as paid_through_date' => fn ($query) => $query
+                    ->where('status', 'posted')
+                    ->whereDate('paid_at', '<=', $throughDate),
+            ], 'amount')
+            ->get()
+            ->sum(fn (InventoryRequest $purchase): float => max(
+                0,
+                (float) $purchase->total_amount - (float) ($purchase->paid_through_date ?? 0),
+            )), 2);
     }
 }

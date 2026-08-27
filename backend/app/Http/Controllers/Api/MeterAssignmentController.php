@@ -4,10 +4,15 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\Customer;
+use App\Models\CustomerCharge;
+use App\Models\CustomerChargeType;
 use App\Models\CustomerContract;
+use App\Models\Employee;
+use App\Models\FinancialCategory;
 use App\Models\Meter;
 use App\Models\MeterAssignment;
 use App\Models\MeterSeal;
+use App\Services\CustomerBillingService;
 use App\Services\CustomerContractWorkflowService;
 use App\Services\MeterInventoryService;
 use Illuminate\Http\JsonResponse;
@@ -27,7 +32,34 @@ class MeterAssignmentController extends Controller
     public function __construct(
         private readonly CustomerContractWorkflowService $contracts,
         private readonly MeterInventoryService $inventory,
+        private readonly CustomerBillingService $billing,
     ) {}
+
+    public function assigners(): JsonResponse
+    {
+        $assigners = Employee::query()
+            ->where('status', 'active')
+            ->whereNotNull('user_id')
+            ->whereHas('user', fn ($query) => $query
+                ->where('status', 'active')
+                ->whereHas('roles', fn ($roles) => $roles
+                    ->where('name', 'Meter Assigner')
+                    ->where('guard_name', 'web')))
+            ->with(['user:id,name,email,status', 'position:id,title'])
+            ->orderBy('employee_number')
+            ->get()
+            ->map(fn (Employee $employee): array => [
+                'id' => $employee->id,
+                'user_id' => $employee->user_id,
+                'employee_number' => $employee->employee_number,
+                'name' => $employee->full_name,
+                'email' => $employee->user?->email,
+                'position' => $employee->position?->title,
+            ])
+            ->values();
+
+        return response()->json(['data' => $assigners]);
+    }
 
     public function index(): JsonResponse
     {
@@ -44,6 +76,7 @@ class MeterAssignmentController extends Controller
             $assignment = DB::transaction(function () use ($request, $data, $sealPhoto, &$storedPhotoPath): MeterAssignment {
                 $customer = Customer::query()->whereKey($data['customer_id'])->lockForUpdate()->firstOrFail();
                 $meter = Meter::query()->whereKey($data['meter_id'])->lockForUpdate()->firstOrFail();
+                $meterAssigner = $this->resolveMeterAssigner((int) $data['meter_assigner_id']);
                 $meter = $this->inventory->ensureLegacyProvenance($meter, $request->user());
                 abort_unless($meter->status === 'available', 422, 'Only an available meter can be assigned.');
                 abort_unless($meter->current_warehouse_id, 422, 'This meter is not held in an active warehouse.');
@@ -63,6 +96,13 @@ class MeterAssignmentController extends Controller
                     ->first();
                 $contract = $this->resolveContract($customer, $data['customer_contract_id'] ?? null);
                 $sealedAt = $data['sealed_at'] ?? $data['installation_date'];
+                $replacementFee = round((float) ($data['replacement_fee'] ?? 0), 2);
+
+                if (! $currentAssignment && $replacementFee > 0.005) {
+                    throw ValidationException::withMessages([
+                        'replacement_fee' => ['A replacement fee can only be charged when an active customer meter is being replaced.'],
+                    ]);
+                }
 
                 if ($currentAssignment) {
                     abort_unless($contract->status === 'active', 422, 'Meter replacement requires an active customer contract.');
@@ -94,11 +134,14 @@ class MeterAssignmentController extends Controller
                     $assignmentData['seal_notes'],
                     $assignmentData['previous_meter_disposition'],
                     $assignmentData['return_warehouse_id'],
+                    $assignmentData['meter_assigner_id'],
+                    $assignmentData['replacement_fee'],
+                    $assignmentData['replacement_due_date'],
                 );
                 $assignment = MeterAssignment::query()->create(array_merge($assignmentData, [
                     'customer_contract_id' => $contract->id,
                     'source_warehouse_id' => $meter->current_warehouse_id,
-                    'installed_by' => $request->user()->id,
+                    'installed_by' => $meterAssigner->user_id,
                     'status' => 'active',
                 ]));
 
@@ -113,6 +156,20 @@ class MeterAssignmentController extends Controller
                 ]));
 
                 $this->inventory->issueForAssignment($meter, $assignment, $request->user(), $data['installation_date']);
+
+                if ($currentAssignment && $replacementFee > 0.005) {
+                    $replacementCharge = $this->issueReplacementFee(
+                        $customer,
+                        $contract,
+                        $currentAssignment,
+                        $assignment,
+                        $replacementFee,
+                        $data['installation_date'],
+                        $data['replacement_due_date'] ?? null,
+                        $request,
+                    );
+                    $currentAssignment->update(['replacement_charge_id' => $replacementCharge->id]);
+                }
 
                 if (! $currentAssignment) {
                     $this->contracts->activate($contract, $request->user(), $data['installation_date']);
@@ -198,7 +255,7 @@ class MeterAssignmentController extends Controller
     {
         $data = $request->validate([
             'seal_number' => ['required', 'string', 'max:100', Rule::unique('meter_seals', 'seal_number')],
-            'sealed_at' => ['required', 'date'],
+            'sealed_at' => ['required', 'date', 'before_or_equal:today'],
             'previous_seal_status' => ['required', Rule::in(['broken', 'removed', 'replaced'])],
             'removal_reason' => ['required', 'string', 'max:2000'],
             'seal_photo' => ['nullable', 'image', 'max:5120', 'mimes:jpg,jpeg,png,webp'],
@@ -288,13 +345,16 @@ class MeterAssignmentController extends Controller
             'customer_id' => [$required, 'integer', 'exists:customers,id'],
             'customer_contract_id' => ['nullable', 'integer', 'exists:customer_contracts,id'],
             'meter_id' => [$required, 'integer', 'exists:meters,id'],
+            'meter_assigner_id' => [$required, 'integer', 'exists:employees,id'],
             'source_warehouse_id' => ['nullable', 'integer', 'exists:warehouses,id'],
             'initial_reading' => ['nullable', 'numeric', 'min:0'],
-            'installation_date' => [$required, 'date'],
+            'installation_date' => [$required, 'date', 'before_or_equal:today'],
             'status' => ['nullable', Rule::in(['active', 'replaced', 'removed'])],
             'removed_at' => ['nullable', 'date'],
             'notes' => ['nullable', 'string'],
             'previous_meter_disposition' => ['nullable', Rule::in(['return_to_stock', 'repair', 'scrap'])],
+            'replacement_fee' => ['nullable', 'numeric', 'min:0', 'max:999999999999.99'],
+            'replacement_due_date' => ['nullable', 'date', 'after_or_equal:installation_date'],
             'return_warehouse_id' => [
                 'nullable',
                 'integer',
@@ -305,19 +365,89 @@ class MeterAssignmentController extends Controller
         if (! $partial) {
             $rules = array_merge($rules, [
                 'seal_number' => ['required', 'string', 'max:100', Rule::unique('meter_seals', 'seal_number')],
-                'sealed_at' => ['nullable', 'date', 'after_or_equal:installation_date'],
+                'sealed_at' => ['nullable', 'date', 'after_or_equal:installation_date', 'before_or_equal:today'],
                 'seal_photo' => ['nullable', 'image', 'max:5120', 'mimes:jpg,jpeg,png,webp'],
                 'seal_notes' => ['nullable', 'string'],
             ]);
         }
 
         return $request->validate($rules, [
+            'meter_assigner_id.required' => 'Select the employee responsible for assigning and installing this meter.',
+            'meter_assigner_id.exists' => 'The selected Meter Assigner employee does not exist.',
             'seal_number.required' => 'Enter the physical meter seal number before activating service.',
             'seal_number.unique' => 'This seal number has already been used. Every physical seal must have a unique number.',
             'sealed_at.after_or_equal' => 'The sealing date cannot be before the installation date.',
+            'replacement_due_date.after_or_equal' => 'The replacement invoice due date cannot be before the installation date.',
             'seal_photo.max' => 'The seal photograph must not exceed 5 MB.',
             'seal_photo.mimes' => 'The seal photograph must be a JPG, PNG, or WebP image.',
         ]);
+    }
+
+    private function resolveMeterAssigner(int $employeeId): Employee
+    {
+        $employee = Employee::query()
+            ->with('user.roles')
+            ->whereKey($employeeId)
+            ->where('status', 'active')
+            ->first();
+
+        if (
+            ! $employee?->user
+            || $employee->user->status !== 'active'
+            || ! $employee->user->hasRole('Meter Assigner')
+        ) {
+            throw ValidationException::withMessages([
+                'meter_assigner_id' => ['Select an active employee with an active login and the Meter Assigner role.'],
+            ]);
+        }
+
+        return $employee;
+    }
+
+    private function issueReplacementFee(
+        Customer $customer,
+        CustomerContract $contract,
+        MeterAssignment $previousAssignment,
+        MeterAssignment $newAssignment,
+        float $amount,
+        string $replacementDate,
+        ?string $dueDate,
+        Request $request,
+    ): CustomerCharge {
+        $chargeType = CustomerChargeType::query()->updateOrCreate(
+            ['code' => 'replacement_fee'],
+            [
+                'name' => 'Meter Replacement Fee',
+                'description' => 'System charge generated when an installed customer meter is replaced.',
+                'status' => 'active',
+                'is_system' => true,
+            ],
+        );
+        $category = FinancialCategory::query()->firstOrCreate(
+            ['code' => 'customer_charge_income'],
+            ['name' => 'Customer Charge Income', 'type' => 'income', 'status' => 'active'],
+        );
+        $previousMeter = $previousAssignment->meter()->value('meter_number') ?? 'previous meter';
+        $newMeter = $newAssignment->meter()->value('meter_number') ?? 'new meter';
+        $auditNote = "Meter {$previousMeter} was replaced by {$newMeter}.";
+        $notes = trim($auditNote.' '.($newAssignment->notes ?? ''));
+
+        $charge = CustomerCharge::query()->create([
+            'customer_id' => $customer->id,
+            'customer_contract_id' => $contract->id,
+            'customer_charge_type_id' => $chargeType->id,
+            'financial_category_id' => $category->id,
+            'created_by' => $request->user()?->id,
+            'title' => 'Meter replacement fee',
+            'type' => 'replacement_fee',
+            'amount' => $amount,
+            'charge_date' => $replacementDate,
+            'status' => 'posted',
+            'notes' => $notes,
+        ]);
+        $this->billing->issueChargeInvoice($charge, $dueDate);
+
+        return $charge;
     }
 
     private function closeCurrentSeal(
@@ -365,8 +495,13 @@ class MeterAssignmentController extends Controller
     private function relations(): array
     {
         return [
-            'customer:id,name,house_number,status,agreement_status',
+            'customer:id,service_area_id,service_area_mosque_id,subscription_code,name,last_name,phone,house_number,status,agreement_status',
+            'customer.serviceArea:id,name,status',
+            'customer.serviceAreaMosque:id,service_area_id,name,status',
             'contract:id,customer_id,contract_number,status,net_amount,remaining_amount',
+            'replacementCharge:id,customer_id,customer_contract_id,invoice_id,customer_charge_type_id,title,type,amount,paid_amount,remaining_amount,charge_date,status',
+            'replacementCharge.chargeType:id,name,code,status,is_system',
+            'replacementCharge.invoice:id,invoice_number,invoice_type,total_amount,paid_amount,remaining_amount,status,due_date',
             'meter:id,good_id,inventory_item_id,source_warehouse_id,current_warehouse_id,meter_number,status,purchase_cost,source_type',
             'meter.good:id,name,code',
             'meter.supplier:id,name',

@@ -7,6 +7,7 @@ use App\Models\AccountingTransaction;
 use App\Models\FinancialCategory;
 use App\Models\Payment;
 use App\Models\PaymentAllocation;
+use App\Models\PaymentMethod;
 use App\Models\User;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
@@ -34,11 +35,12 @@ class CustomerPaymentRefundService
 
             $amount = round(max(0, (float) $payment->amount - (float) $payment->refunded_amount), 2);
             abort_if($amount <= 0.005, 422, 'This payment has already been fully refunded.');
-            $account = AccountingAccount::query()->whereKey($payment->accounting_account_id)->lockForUpdate()->firstOrFail();
+            [$account, $refundPaymentMethodId] = $this->resolveRefundAccount($payment, $data);
             $refundReceipt = Payment::nextRefundReceiptNumber();
             $transaction = $this->createRefundTransaction(
                 $payment,
                 $account,
+                $refundPaymentMethodId,
                 $amount,
                 $refundReceipt,
                 'customer_payment_refund',
@@ -86,7 +88,7 @@ class CustomerPaymentRefundService
                 'account:id,name,code,type,current_balance',
                 'receiver:id,name',
                 'refunder:id,name',
-                'refundTransaction',
+                'refundTransaction.account:id,name,code,type,current_balance',
                 'allocations.invoice:id,invoice_number,invoice_type,total_amount,paid_amount,remaining_amount,status',
             ]);
         });
@@ -115,11 +117,12 @@ class CustomerPaymentRefundService
             $amount = round((float) $allocations->sum(fn (PaymentAllocation $allocation): float => max(0, (float) $allocation->amount - (float) $allocation->refunded_amount)), 2);
             abort_if($amount <= 0.005, 422, 'This receipt has no refundable amount for the selected invoice.');
 
-            $account = AccountingAccount::query()->whereKey($payment->accounting_account_id)->lockForUpdate()->firstOrFail();
+            [$account, $refundPaymentMethodId] = $this->resolveRefundAccount($payment, $data);
             $refundReceipt = Payment::nextRefundReceiptNumber();
             $transaction = $this->createRefundTransaction(
                 $payment,
                 $account,
+                $refundPaymentMethodId,
                 $amount,
                 $refundReceipt,
                 'customer_payment_allocation_refund',
@@ -165,7 +168,7 @@ class CustomerPaymentRefundService
                 'account:id,name,code,type,current_balance',
                 'receiver:id,name',
                 'refunder:id,name',
-                'refundTransaction',
+                'refundTransaction.account:id,name,code,type,current_balance',
                 'allocations.invoice:id,invoice_number,invoice_type,total_amount,paid_amount,remaining_amount,status',
             ]);
         });
@@ -174,6 +177,7 @@ class CustomerPaymentRefundService
     private function createRefundTransaction(
         Payment $payment,
         AccountingAccount $account,
+        int $paymentMethodId,
         float $amount,
         string $refundReceipt,
         string $sourceType,
@@ -183,7 +187,7 @@ class CustomerPaymentRefundService
     ): AccountingTransaction {
         if ((float) $account->current_balance + 0.005 < $amount) {
             throw ValidationException::withMessages([
-                'accounting_account_id' => ['The original receiving account does not have enough balance for this refund.'],
+                'accounting_account_id' => ['The selected refund account does not have enough balance for this refund.'],
             ]);
         }
 
@@ -194,8 +198,8 @@ class CustomerPaymentRefundService
 
         $transaction = AccountingTransaction::query()->create([
             'financial_category_id' => $category->id,
-            'payment_method_id' => $payment->payment_method_id,
-            'accounting_account_id' => $payment->accounting_account_id,
+            'payment_method_id' => $paymentMethodId,
+            'accounting_account_id' => $account->id,
             'customer_id' => $payment->customer_id,
             'recorded_by' => $user->id,
             'reviewed_by' => $user->id,
@@ -218,5 +222,65 @@ class CustomerPaymentRefundService
         $transaction->postToAccount();
 
         return $transaction;
+    }
+
+    private function resolveRefundAccount(Payment $payment, array $data): array
+    {
+        $accountId = (int) ($data['accounting_account_id'] ?? $payment->accounting_account_id);
+        $account = AccountingAccount::query()
+            ->whereKey($accountId)
+            ->lockForUpdate()
+            ->firstOrFail();
+        if ($account->status !== 'active') {
+            throw ValidationException::withMessages([
+                'accounting_account_id' => ['The selected refund account must be active.'],
+            ]);
+        }
+
+        $canonicalMethodCode = match ($account->type) {
+            'bank' => 'bank_transfer',
+            'mobile_money' => 'mobile_money',
+            'check' => 'check',
+            'online' => 'online_payment',
+            default => 'cash',
+        };
+
+        $paymentMethod = PaymentMethod::query()
+            ->whereKey($payment->payment_method_id)
+            ->where('status', 'active')
+            ->first();
+        if ($paymentMethod && $this->accountTypeForPaymentMethod($paymentMethod) !== $account->type) {
+            $paymentMethod = null;
+        }
+
+        $paymentMethod ??= PaymentMethod::query()
+            ->where('code', $canonicalMethodCode)
+            ->where('status', 'active')
+            ->first();
+        $paymentMethod ??= PaymentMethod::query()
+            ->where('status', 'active')
+            ->get()
+            ->first(fn (PaymentMethod $method): bool => $this->accountTypeForPaymentMethod($method) === $account->type);
+
+        if (! $paymentMethod) {
+            throw ValidationException::withMessages([
+                'accounting_account_id' => ["No active payment method is compatible with the selected {$account->type} account."],
+            ]);
+        }
+
+        return [$account, $paymentMethod->id];
+    }
+
+    private function accountTypeForPaymentMethod(PaymentMethod $method): string
+    {
+        $code = strtolower(str_replace(['-', ' '], '_', trim($method->code)));
+
+        return match (true) {
+            $code === 'bank', str_starts_with($code, 'bank_') => 'bank',
+            $code === 'mobile', str_starts_with($code, 'mobile_') => 'mobile_money',
+            $code === 'check', str_starts_with($code, 'check_') => 'check',
+            $code === 'online', str_starts_with($code, 'online_') => 'online',
+            default => 'cash',
+        };
     }
 }

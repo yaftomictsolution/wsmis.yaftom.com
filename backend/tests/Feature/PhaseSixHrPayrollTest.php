@@ -7,6 +7,8 @@ use App\Models\AttendanceRecord;
 use App\Models\Employee;
 use App\Models\EmployeeAdjustment;
 use App\Models\PaymentMethod;
+use App\Models\PayrollItem;
+use App\Models\PayrollRun;
 use App\Models\SalaryAdvance;
 use App\Models\User;
 use Carbon\CarbonPeriod;
@@ -20,6 +22,73 @@ use Tests\TestCase;
 class PhaseSixHrPayrollTest extends TestCase
 {
     use RefreshDatabase;
+
+    public function test_manager_can_delete_approved_attendance_until_a_payroll_uses_it(): void
+    {
+        [$hr, $manager] = $this->workflowUsers();
+
+        Sanctum::actingAs($hr);
+        $employeeId = $this->postJson('/api/employees', $this->employeePayload())
+            ->assertCreated()
+            ->json('data.id');
+        $deletableId = $this->postJson('/api/attendance', [
+            'employee_id' => $employeeId,
+            'attendance_date' => '2026-07-01',
+            'check_in' => '08:00',
+            'check_out' => '16:00',
+            'attendance_status' => 'present',
+        ])->assertCreated()->json('data.id');
+
+        Sanctum::actingAs($manager);
+        $this->postJson("/api/attendance/{$deletableId}/resolve", ['action' => 'approve'])
+            ->assertOk();
+        $this->deleteJson("/api/attendance/{$deletableId}")
+            ->assertOk()
+            ->assertJsonPath('message', 'Attendance record deleted.');
+        $this->assertDatabaseMissing('attendance_records', ['id' => $deletableId]);
+
+        Sanctum::actingAs($hr);
+        $protectedId = $this->postJson('/api/attendance', [
+            'employee_id' => $employeeId,
+            'attendance_date' => '2026-07-02',
+            'check_in' => '08:00',
+            'check_out' => '16:00',
+            'attendance_status' => 'present',
+        ])->assertCreated()->json('data.id');
+        Sanctum::actingAs($manager);
+        $this->postJson("/api/attendance/{$protectedId}/resolve", ['action' => 'approve'])
+            ->assertOk();
+
+        $payroll = PayrollRun::query()->create([
+            'created_by' => $hr->id,
+            'payroll_number' => 'PAY-ATTENDANCE-GUARD',
+            'title' => 'Attendance Guard Payroll',
+            'generated_from_hr' => true,
+            'period_start' => '2026-07-01',
+            'period_end' => '2026-07-02',
+            'payment_date' => '2026-07-02',
+            'status' => 'draft',
+        ]);
+        PayrollItem::query()->create([
+            'payroll_run_id' => $payroll->id,
+            'employee_id' => $employeeId,
+            'employee_name' => 'Ahmad Karimi',
+            'salary_type' => 'fixed',
+            'contracted_salary' => 3000,
+            'base_salary' => 3000,
+            'net_amount' => 3000,
+        ]);
+
+        $this->deleteJson("/api/attendance/{$protectedId}")
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors('attendance');
+        $this->assertDatabaseHas('attendance_records', ['id' => $protectedId]);
+
+        $payroll->update(['status' => 'cancelled']);
+        $this->deleteJson("/api/attendance/{$protectedId}")
+            ->assertOk();
+        $this->assertDatabaseMissing('attendance_records', ['id' => $protectedId]);
+    }
 
     public function test_attendance_adjustments_and_advance_generate_and_post_correct_payroll(): void
     {
@@ -239,6 +308,23 @@ class PhaseSixHrPayrollTest extends TestCase
             'login_status' => 'active',
         ]))->assertUnprocessable()->assertJsonValidationErrors('email');
         $this->assertDatabaseCount('employees', 1);
+        $this->assertDatabaseCount('users', 4);
+
+        $employeeWithoutLoginId = $this->postJson('/api/employees', $this->employeePayload(null, [
+            'first_name' => 'Fatima',
+            'last_name' => 'Karimi',
+            'email' => 'fatima.hr@example.com',
+            'login_enabled' => false,
+            'login_password' => 'StalePassword123',
+            'login_password_confirmation' => 'DoesNotMatch123',
+            'login_role' => 'Role That Does Not Exist',
+            'login_status' => 'invalid',
+        ]))->assertCreated()
+            ->assertJsonPath('data.full_name', 'Fatima Karimi')
+            ->assertJsonPath('data.user', null)
+            ->json('data.id');
+
+        $this->assertDatabaseHas('employees', ['id' => $employeeWithoutLoginId, 'user_id' => null]);
         $this->assertDatabaseCount('users', 4);
 
         $this->putJson("/api/employees/{$employeeId}", $this->employeePayload(null, [
