@@ -3,6 +3,7 @@
 namespace App\Services\Sync;
 
 use App\Models\SyncEntity;
+use App\Models\User;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
@@ -139,6 +140,7 @@ class SyncCatalog
 
             if ($recordId === null) {
                 $relationships[$column] = null;
+
                 continue;
             }
 
@@ -175,6 +177,35 @@ class SyncCatalog
         ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PRESERVE_ZERO_FRACTION));
     }
 
+    public function normalizeSnapshot(string $table, array $snapshot): array
+    {
+        $payload = $snapshot['payload'] ?? [];
+        foreach (config("sync.ignored_columns.{$table}", []) as $ignoredColumn) {
+            unset($payload[$ignoredColumn]);
+        }
+
+        $relationships = $snapshot['relationships'] ?? [];
+        ksort($payload);
+        ksort($relationships);
+
+        return [
+            'payload' => $payload,
+            'relationships' => $relationships,
+            'files' => $snapshot['files'] ?? [],
+        ];
+    }
+
+    public function snapshotsEquivalent(string $table, array $left, array $right): bool
+    {
+        $left = $this->normalizeSnapshot($table, $left);
+        $right = $this->normalizeSnapshot($table, $right);
+
+        return hash_equals(
+            $this->checksum($left['payload'], $left['relationships']),
+            $this->checksum($right['payload'], $right['relationships']),
+        );
+    }
+
     public function recordExists(string $table, int $recordId): bool
     {
         return DB::table($table)->where('id', $recordId)->exists();
@@ -183,7 +214,7 @@ class SyncCatalog
     public function applyVirtualFields(string $table, int $recordId, array $payload): void
     {
         if ($table === 'users') {
-            $modelType = \App\Models\User::class;
+            $modelType = User::class;
             $this->syncNamedPivot(
                 'model_has_roles',
                 'role_id',
@@ -255,7 +286,7 @@ class SyncCatalog
     private function appendVirtualFields(string $table, int $recordId, array &$payload): void
     {
         if ($table === 'users') {
-            $modelType = \App\Models\User::class;
+            $modelType = User::class;
             $payload['__sync_roles'] = DB::table('model_has_roles')
                 ->join('roles', 'roles.id', '=', 'model_has_roles.role_id')
                 ->where('model_has_roles.model_type', $modelType)

@@ -2,20 +2,20 @@
 
 namespace Tests\Feature;
 
-use Database\Seeders\DatabaseSeeder;
 use App\Models\ServiceArea;
 use App\Models\SyncChange;
 use App\Models\SyncConflict;
 use App\Models\SyncDevice;
 use App\Models\SyncEntity;
 use App\Models\User;
+use App\Services\Sync\OfflineSyncManager;
 use App\Services\Sync\SyncApplyService;
 use App\Services\Sync\SyncCatalog;
 use App\Services\Sync\SyncChangeDetector;
 use App\Services\Sync\SyncFileService;
 use App\Services\Sync\SyncIntegrityService;
 use App\Services\Sync\SyncNodeManager;
-use App\Services\Sync\OfflineSyncManager;
+use Database\Seeders\DatabaseSeeder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
@@ -623,6 +623,89 @@ class OfflineSynchronizationTest extends TestCase
         $this->assertSame('accepted', $result['status']);
         $this->assertSame(4, SyncEntity::query()->where('entity_uuid', $entityUuid)->value('version'));
         $this->assertDatabaseCount('service_areas', 1);
+    }
+
+    public function test_login_activity_does_not_create_a_user_sync_change(): void
+    {
+        config()->set('sync.tables', ['permissions', 'roles', 'users']);
+        $user = User::factory()->create([
+            'email' => 'sync-login@example.test',
+            'password' => 'password123',
+            'status' => 'active',
+        ]);
+        $detector = app(SyncChangeDetector::class);
+        $detector->detect();
+        SyncChange::query()->update(['pushed_at' => now()]);
+        $updatedAt = DB::table('users')->where('id', $user->id)->value('updated_at');
+
+        $this->travel(5)->minutes();
+        $this->postJson('/api/auth/login', [
+            'email' => 'sync-login@example.test',
+            'password' => 'password123',
+        ])->assertOk();
+
+        $this->assertSame($updatedAt, DB::table('users')->where('id', $user->id)->value('updated_at'));
+        $this->assertNotNull(DB::table('users')->where('id', $user->id)->value('last_login_at'));
+        $result = $detector->detect();
+        $this->assertSame(0, $result['created'] + $result['updated'] + $result['deleted']);
+        $this->assertSame(0, SyncChange::query()->whereNull('pushed_at')->count());
+    }
+
+    public function test_newly_ignored_user_timestamp_rebases_metadata_without_creating_a_change(): void
+    {
+        config()->set('sync.tables', ['permissions', 'roles', 'users']);
+        config()->set('sync.ignored_columns.users', ['remember_token', 'last_login_at']);
+        $user = User::factory()->create(['status' => 'active']);
+        $detector = app(SyncChangeDetector::class);
+        $detector->detect();
+        SyncChange::query()->update(['pushed_at' => now()]);
+        $entity = SyncEntity::query()->where('table_name', 'users')->firstOrFail();
+        $version = (int) $entity->version;
+
+        DB::table('users')->where('id', $user->id)->update(['updated_at' => now()->addHour()]);
+        config()->set('sync.ignored_columns.users', ['remember_token', 'last_login_at', 'updated_at']);
+        $result = $detector->detect();
+
+        $this->assertSame(0, $result['created'] + $result['updated'] + $result['deleted']);
+        $this->assertSame($version, (int) $entity->fresh()->version);
+        $this->assertArrayNotHasKey('updated_at', $entity->fresh()->snapshot['payload']);
+        $this->assertSame(0, SyncChange::query()->whereNull('pushed_at')->count());
+    }
+
+    public function test_timestamp_only_user_conflict_is_resolved_automatically(): void
+    {
+        config()->set('sync.tables', ['permissions', 'roles', 'users']);
+        $user = User::factory()->create(['status' => 'active']);
+        app(SyncChangeDetector::class)->detect();
+        SyncChange::query()->update(['pushed_at' => now()]);
+        $entity = SyncEntity::query()->where('table_name', 'users')->firstOrFail();
+        $remote = [
+            'operation' => 'update',
+            'payload' => $entity->snapshot['payload'] + ['updated_at' => now()->addHour()->toDateTimeString()],
+            'relationships' => $entity->snapshot['relationships'] ?? [],
+            'files' => [],
+        ];
+        SyncConflict::query()->create([
+            'conflict_uuid' => (string) Str::uuid(),
+            'entity_uuid' => $entity->entity_uuid,
+            'table_name' => 'users',
+            'local_snapshot' => $entity->snapshot,
+            'remote_snapshot' => $remote,
+            'local_version' => $entity->version,
+            'remote_version' => $entity->version + 1,
+            'reason' => 'The incoming change is based on an older record version.',
+            'status' => 'open',
+            'detected_at' => now(),
+        ]);
+
+        $this->assertSame(1, app(SyncApplyService::class)->resolveEquivalentConflicts());
+        $this->assertDatabaseHas('sync_conflicts', [
+            'entity_uuid' => $entity->entity_uuid,
+            'status' => 'resolved',
+            'resolution' => 'same_content',
+        ]);
+        $this->assertSame((int) $entity->version + 1, (int) $entity->fresh()->version);
+        $this->assertSame($user->id, (int) $entity->fresh()->record_id);
     }
 
     public function test_full_system_catalog_can_be_scanned_twice_without_missing_tables_or_duplicate_outbox_rows(): void

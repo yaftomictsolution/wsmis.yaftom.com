@@ -17,6 +17,32 @@ New-Item -ItemType Directory -Force -Path $DataRoot, $BackendRoot, $LogRoot, $My
 $transcriptPath = Join-Path $LogRoot ("setup-{0}.log" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
 Start-Transcript -Path $transcriptPath -Force | Out-Null
 
+function Set-WSMISPhpTlsConfig {
+    $phpIni = Join-Path $ProgramRoot 'runtime\php\php.ini'
+    $caBundle = Join-Path $ProgramRoot 'runtime\php\extras\ssl\cacert.pem'
+
+    if (-not (Test-Path -LiteralPath $phpIni)) {
+        throw "The packaged PHP configuration was not found at $phpIni"
+    }
+    if (-not (Test-Path -LiteralPath $caBundle)) {
+        throw "The packaged TLS certificate bundle was not found at $caBundle"
+    }
+
+    $escapedBundle = $caBundle.Replace('\', '/')
+    $content = Get-Content -LiteralPath $phpIni -Raw
+    $content = [regex]::Replace($content, '(?m)^curl\.cainfo\s*=.*$', "curl.cainfo=`"$escapedBundle`"")
+    $content = [regex]::Replace($content, '(?m)^openssl\.cafile\s*=.*$', "openssl.cafile=`"$escapedBundle`"")
+
+    if ($content -notmatch '(?m)^curl\.cainfo\s*=') {
+        $content += "`r`ncurl.cainfo=`"$escapedBundle`""
+    }
+    if ($content -notmatch '(?m)^openssl\.cafile\s*=') {
+        $content += "`r`nopenssl.cafile=`"$escapedBundle`""
+    }
+
+    Set-Content -LiteralPath $phpIni -Value $content -Encoding ASCII
+}
+
 function Install-WSMISWrappedService {
     param([Parameter(Mandatory = $true)][string]$RunnerPath)
 
@@ -58,6 +84,7 @@ try {
     Assert-WSMISPortAvailable -Port 3307
     Assert-WSMISPortAvailable -Port 8000
     Assert-WSMISPortAvailable -Port 3000
+    Set-WSMISPhpTlsConfig
 
     Write-WSMISProgress -DataRoot $DataRoot -Progress 5 -Message 'Preparing the private MySQL database'
     $mysqlBase = (Join-Path $ProgramRoot 'runtime\mysql').Replace('\', '/')

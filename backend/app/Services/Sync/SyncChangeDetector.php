@@ -44,6 +44,23 @@ class SyncChangeDetector
                 $checksum = $this->catalog->checksum($portable['payload'], $portable['relationships']);
 
                 if ($entity->checksum !== $checksum || $entity->deleted_at) {
+                    $currentSnapshot = [
+                        'payload' => $portable['payload'],
+                        'relationships' => $portable['relationships'],
+                        'files' => $fileDescriptors,
+                    ];
+                    if (! $entity->deleted_at
+                        && is_array($entity->snapshot)
+                        && $this->catalog->snapshotsEquivalent($table, $entity->snapshot, $currentSnapshot)) {
+                        $entity->forceFill([
+                            'checksum' => $checksum,
+                            'snapshot' => $currentSnapshot,
+                        ])->save();
+                        $counts['unchanged']++;
+
+                        continue;
+                    }
+
                     $operation = $entity->version === 0 || $entity->deleted_at ? 'create' : 'update';
                     $this->queueChange(
                         $entity,

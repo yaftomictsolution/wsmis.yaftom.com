@@ -5,7 +5,6 @@ namespace App\Services\Sync;
 use App\Models\SyncChange;
 use App\Models\SyncConflict;
 use App\Models\SyncRun;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use RuntimeException;
 use Throwable;
@@ -154,9 +153,11 @@ class OfflineSyncManager
     private function detect(SyncRun $run): void
     {
         $result = $this->detector->detect();
+        $resolvedConflicts = $this->applier->resolveEquivalentConflicts();
         $counts = $run->counts ?? [];
         $counts['detected'] = $result['created'] + $result['updated'] + $result['deleted'];
         $counts['pending'] = $result['pending'];
+        $counts['resolved_equivalent_conflicts'] = $resolvedConflicts;
         $run->forceFill(['stage' => 'push', 'progress' => 25, 'counts' => $counts])->save();
     }
 
@@ -204,6 +205,7 @@ class OfflineSyncManager
             if (($result['status'] ?? null) === 'accepted') {
                 $change->forceFill(['pushed_at' => now()])->save();
                 $counts['pushed'] = ($counts['pushed'] ?? 0) + 1;
+
                 continue;
             }
 

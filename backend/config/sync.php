@@ -106,7 +106,9 @@ return [
     ],
 
     'ignored_columns' => [
-        'users' => ['remember_token', 'last_login_at'],
+        // Login activity is local runtime metadata. It must never turn an
+        // otherwise identical user account into a synchronization conflict.
+        'users' => ['remember_token', 'last_login_at', 'updated_at'],
     ],
 
     // These references are intentionally polymorphic and therefore do not have

@@ -35,19 +35,30 @@ class SyncApplyService
                 ->first()
             : null;
 
-        if ($entity && $change['operation'] !== 'delete'
-            && $entity->checksum
-            && hash_equals((string) $entity->checksum, (string) ($change['checksum'] ?? ''))
+        $incomingSnapshot = [
+            'payload' => $change['payload'] ?? [],
+            'relationships' => $change['relationships'] ?? [],
+            'files' => $change['files'] ?? [],
+        ];
+        $sameContent = $entity && $change['operation'] !== 'delete'
+            && is_array($entity->snapshot)
+            && ($entity->checksum && hash_equals((string) $entity->checksum, (string) ($change['checksum'] ?? ''))
+                || $this->catalog->snapshotsEquivalent($change['table_name'], $entity->snapshot, $incomingSnapshot));
+
+        if ($sameContent
             && $entity->record_id
             && $this->catalog->recordExists($entity->table_name, (int) $entity->record_id)) {
+            $normalized = $this->catalog->normalizeSnapshot($change['table_name'], $incomingSnapshot);
             if ((int) $change['version'] > (int) $entity->version) {
                 $entity->forceFill([
                     'version' => (int) $change['version'],
-                    'snapshot' => [
-                        'payload' => $change['payload'] ?? [],
-                        'relationships' => $change['relationships'] ?? [],
-                        'files' => $change['files'] ?? [],
-                    ],
+                    'checksum' => $this->catalog->checksum($normalized['payload'], $normalized['relationships']),
+                    'snapshot' => $normalized,
+                ])->save();
+            } elseif ($entity->checksum !== $this->catalog->checksum($normalized['payload'], $normalized['relationships'])) {
+                $entity->forceFill([
+                    'checksum' => $this->catalog->checksum($normalized['payload'], $normalized['relationships']),
+                    'snapshot' => $normalized,
                 ])->save();
             }
             $this->recordAcceptedChange($change, $recordInChangeLog);
@@ -208,6 +219,67 @@ class SyncApplyService
         return $conflict->fresh();
     }
 
+    public function resolveEquivalentConflicts(): int
+    {
+        $resolved = 0;
+
+        SyncConflict::query()
+            ->where('status', 'open')
+            ->whereNotNull('remote_snapshot')
+            ->get()
+            ->each(function (SyncConflict $conflict) use (&$resolved): void {
+                $entity = SyncEntity::query()->where('entity_uuid', $conflict->entity_uuid)->first();
+                if (! $entity || $entity->deleted_at || ! is_array($entity->snapshot)) {
+                    return;
+                }
+
+                $remote = $conflict->remote_snapshot;
+                if (($remote['operation'] ?? 'update') === 'delete'
+                    || ! $this->catalog->snapshotsEquivalent($conflict->table_name, $entity->snapshot, $remote)) {
+                    return;
+                }
+
+                DB::transaction(function () use ($conflict, $entity, $remote): void {
+                    $normalized = $this->catalog->normalizeSnapshot($conflict->table_name, $entity->snapshot);
+
+                    SyncChange::query()
+                        ->where('entity_uuid', $entity->entity_uuid)
+                        ->where('source_node_uuid', $this->nodes->state()->node_uuid)
+                        ->whereNull('pushed_at')
+                        ->get()
+                        ->filter(fn (SyncChange $change): bool => $this->catalog->snapshotsEquivalent(
+                            $conflict->table_name,
+                            [
+                                'payload' => $change->payload ?? [],
+                                'relationships' => $change->relationships ?? [],
+                                'files' => $change->files ?? [],
+                            ],
+                            $remote,
+                        ))
+                        ->each(function (SyncChange $change): void {
+                            $change->forceFill(['pushed_at' => now()])->save();
+                        });
+
+                    $entity->forceFill([
+                        'version' => max((int) $entity->version, (int) $conflict->remote_version),
+                        'checksum' => $this->catalog->checksum($normalized['payload'], $normalized['relationships']),
+                        'snapshot' => $normalized,
+                    ])->save();
+
+                    $conflict->forceFill([
+                        'status' => 'resolved',
+                        'resolution' => 'same_content',
+                        'resolved_at' => now(),
+                        'resolved_by' => null,
+                    ])->save();
+                });
+
+                $resolved++;
+            });
+
+        return $resolved;
+    }
+
     public function resolveDeferredRelations(): int
     {
         $resolved = 0;
@@ -241,12 +313,14 @@ class SyncApplyService
 
             if ($reference === null) {
                 $payload[$column] = null;
+
                 continue;
             }
 
             $target = SyncEntity::query()->where('entity_uuid', $reference['entity_uuid'] ?? '')->first();
             if ($target?->record_id && ! $target->deleted_at) {
                 $payload[$column] = $target->record_id;
+
                 continue;
             }
 
