@@ -10,12 +10,14 @@ $LogRoot = Join-Path $DataRoot 'logs'
 $MySqlRoot = Join-Path $DataRoot 'mysql'
 $MySqlData = Join-Path $MySqlRoot 'data'
 $InstallStatePath = Join-Path $DataRoot 'install-state.json'
+$SetupErrorPath = Join-Path $DataRoot 'setup-error.txt'
 $EnvPath = Join-Path $BackendRoot '.env'
 . (Join-Path $PSScriptRoot 'WSMIS.Common.ps1')
 
 New-Item -ItemType Directory -Force -Path $DataRoot, $BackendRoot, $LogRoot, $MySqlRoot, $MySqlData, (Join-Path $DataRoot 'backups') | Out-Null
 $transcriptPath = Join-Path $LogRoot ("setup-{0}.log" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
 Start-Transcript -Path $transcriptPath -Force | Out-Null
+Remove-Item -LiteralPath $SetupErrorPath -Force -ErrorAction SilentlyContinue
 
 function Set-WSMISPhpTlsConfig {
     $phpIni = Join-Path $ProgramRoot 'runtime\php\php.ini'
@@ -219,7 +221,10 @@ SYNC_LEASE_HOURS=72
     try {
         Invoke-WSMISNative -Executable $php -Arguments @('artisan', 'config:clear', '--no-interaction') -FailureMessage 'Unable to clear the Laravel configuration.'
         Invoke-WSMISNative -Executable $php -Arguments @('artisan', 'migrate', '--force', '--no-interaction') -FailureMessage 'Unable to update the WSMIS database.'
-        Invoke-WSMISNative -Executable $php -Arguments @('artisan', 'storage:link', '--force', '--no-interaction') -FailureMessage 'Unable to prepare uploaded-file access.'
+        $publicStorageLink = Join-Path $BackendRoot 'public\storage'
+        if (-not (Test-Path -LiteralPath $publicStorageLink)) {
+            Invoke-WSMISNative -Executable $php -Arguments @('artisan', 'storage:link', '--no-interaction') -FailureMessage 'Unable to prepare uploaded-file access.'
+        }
 
         if ($freshInstall) {
             Write-WSMISProgress -DataRoot $DataRoot -Progress 42 -Message 'Downloading and verifying the cloud database'
@@ -251,13 +256,14 @@ SYNC_LEASE_HOURS=72
         frontend_service = 'WSMISFrontend'
     } | ConvertTo-Json | Set-Content -LiteralPath $InstallStatePath -Encoding UTF8
 
+    Remove-Item -LiteralPath $SetupErrorPath -Force -ErrorAction SilentlyContinue
     Write-WSMISProgress -DataRoot $DataRoot -Progress 100 -Message 'WSMIS is installed and ready'
     Stop-Transcript | Out-Null
     exit 0
 } catch {
     $message = $_.Exception.Message
     try {
-        Set-Content -LiteralPath (Join-Path $DataRoot 'setup-error.txt') -Value $message -Encoding UTF8
+        Set-Content -LiteralPath $SetupErrorPath -Value $message -Encoding UTF8
         Write-WSMISProgress -DataRoot $DataRoot -Progress 100 -Message "Setup failed: $message"
     } catch {
     }
