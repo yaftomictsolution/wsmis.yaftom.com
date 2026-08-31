@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { useDispatch } from 'react-redux'
-import { CalendarDays, ExternalLink, GraduationCap, Plus, RotateCcw, Save, ShieldCheck } from 'lucide-react'
+import { CalendarDays, ClipboardCopy, ExternalLink, GraduationCap, Laptop, Plus, RefreshCw, RotateCcw, Save, ShieldCheck, Trash2 } from 'lucide-react'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { DataTable, type Column } from '@/components/ui/DataTable'
 import { Modal } from '@/components/ui/Modal'
@@ -23,6 +23,8 @@ import {
   useDeleteFinancialCategoryMutation,
   useDeletePaymentMethodMutation,
   useGetMeQuery,
+  useGetSyncDevicesQuery,
+  useGetSyncStatusQuery,
   useGetLeaveSettingsQuery,
   useGetSettingsQuery,
   useGetTrainingModeQuery,
@@ -34,11 +36,16 @@ import {
   useUpdateLeaveSettingsMutation,
   useUpdateSystemProfileMutation,
   useUpdateTrainingModeMutation,
+  useCreateSyncDeviceMutation,
+  useRotateSyncDeviceMutation,
+  useRevokeSyncDeviceMutation,
   type CustomerChargeType,
   type FinancialCategory,
   type LeaveSettings,
   type PaymentMethod,
   type SystemProfile,
+  type SyncDevice,
+  type SyncDeviceCredentials,
   type TrainingResetProgress,
   waternetApi,
 } from '@/src/store/waternetApi'
@@ -77,6 +84,10 @@ export default function SettingsPage() {
   const { data, isLoading, isError } = useGetSettingsQuery()
   const { data: trainingMode, isLoading: trainingModeLoading } = useGetTrainingModeQuery()
   const { data: currentUser } = useGetMeQuery()
+  const canManageSyncDevices = currentUser?.roles.some((role) => ['Admin', 'Super Admin'].includes(role)) ?? false
+  const { data: syncStatus } = useGetSyncStatusQuery(undefined, { skip: !canManageSyncDevices })
+  const showSyncDevices = canManageSyncDevices && syncStatus?.mode === 'cloud'
+  const { data: syncDevices = [], isLoading: syncDevicesLoading } = useGetSyncDevicesQuery(undefined, { skip: !showSyncDevices })
   const canManageLeaveSettings = currentUser?.roles.some((role) => ['Admin', 'Super Admin'].includes(role)) ?? false
   const { data: leaveSettingsData, isLoading: leaveSettingsLoading, isError: leaveSettingsError } = useGetLeaveSettingsQuery(undefined, { skip: !canManageLeaveSettings })
   const [updateSystemProfile] = useUpdateSystemProfileMutation()
@@ -93,6 +104,9 @@ export default function SettingsPage() {
   const [createCustomerChargeType] = useCreateCustomerChargeTypeMutation()
   const [updateCustomerChargeType] = useUpdateCustomerChargeTypeMutation()
   const [deleteCustomerChargeType] = useDeleteCustomerChargeTypeMutation()
+  const [createSyncDevice, createSyncDeviceState] = useCreateSyncDeviceMutation()
+  const [rotateSyncDevice, rotateSyncDeviceState] = useRotateSyncDeviceMutation()
+  const [revokeSyncDevice] = useRevokeSyncDeviceMutation()
   const [profileDraft, setProfileDraft] = useState<SystemProfile | null>(null)
   const [leaveSettingsDraft, setLeaveSettingsDraft] = useState<LeaveSettings | null>(null)
   const [paymentCurrent, setPaymentCurrent] = useState<Partial<PaymentMethod>>({})
@@ -111,6 +125,10 @@ export default function SettingsPage() {
   const [resetError, setResetError] = useState('')
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
+  const [syncDeviceModalOpen, setSyncDeviceModalOpen] = useState(false)
+  const [syncDeviceName, setSyncDeviceName] = useState('')
+  const [syncCredentials, setSyncCredentials] = useState<SyncDeviceCredentials | null>(null)
+  const [syncDeviceToRevoke, setSyncDeviceToRevoke] = useState<SyncDevice | null>(null)
 
   useEffect(() => {
     const url = new URL(window.location.href)
@@ -302,11 +320,114 @@ export default function SettingsPage() {
     }
   }
 
+  const createLocalComputer = async () => {
+    if (!syncDeviceName.trim()) return
+    setError('')
+    try {
+      const credentials = await createSyncDevice({ name: syncDeviceName.trim() }).unwrap()
+      setSyncDeviceModalOpen(false)
+      setSyncDeviceName('')
+      setSyncCredentials(credentials)
+    } catch (createError) {
+      setError(apiErrorMessage(createError, 'Unable to create local-computer credentials.'))
+    }
+  }
+
+  const rotateLocalComputer = async (device: SyncDevice) => {
+    setError('')
+    try {
+      setSyncCredentials(await rotateSyncDevice(device.id).unwrap())
+    } catch (rotateError) {
+      setError(apiErrorMessage(rotateError, 'Unable to rotate local-computer credentials.'))
+    }
+  }
+
+  const revokeLocalComputer = async () => {
+    if (!syncDeviceToRevoke) return
+    setError('')
+    try {
+      await revokeSyncDevice(syncDeviceToRevoke.id).unwrap()
+      setSyncDeviceToRevoke(null)
+    } catch (revokeError) {
+      setError(apiErrorMessage(revokeError, 'Unable to revoke this local computer.'))
+      setSyncDeviceToRevoke(null)
+    }
+  }
+
+  const copySetupCredentials = async () => {
+    if (!syncCredentials) return
+    await navigator.clipboard.writeText([
+      `Cloud API: ${syncCredentials.api_url}`,
+      `Device ID: ${syncCredentials.device.uuid}`,
+      `Device Secret: ${syncCredentials.secret}`,
+    ].join('\n'))
+    setMessage('Installer credentials copied. Keep the secret private.')
+  }
+
   return (
     <div className="p-6 lg:p-8 max-w-[1600px] mx-auto space-y-6">
       <PageHeader title="Settings" subtitle="Manage system identity, training, leave rules, payment methods, financial categories, and customer charge types" />
       {message && <div className="rounded-lg border border-[var(--mint)] bg-[var(--mint-soft)] px-4 py-3 text-sm font-bold text-[var(--mint)]">{message}</div>}
       {(error || isError || leaveSettingsError) && <div className="rounded-lg border border-[var(--coral)] bg-[var(--coral-soft)] px-4 py-3 text-sm font-bold text-[var(--coral)]">{error || 'Unable to load settings.'}</div>}
+
+      {showSyncDevices ? (
+        <section id="local-computers" className="elegant-panel p-5">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex items-start gap-3">
+              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-[var(--accent-soft)] text-[var(--accent)]">
+                <Laptop size={20} />
+              </span>
+              <div>
+                <h2 className="text-lg font-extrabold text-[var(--text-primary)]">Local Computers</h2>
+                <p className="mt-1 text-sm text-[var(--text-muted)]">Create one-time pairing credentials for the WSMIS Windows installer.</p>
+              </div>
+            </div>
+            <button type="button" className="primary-action text-sm" onClick={() => setSyncDeviceModalOpen(true)}>
+              <Plus size={17} /> Add Computer
+            </button>
+          </div>
+
+          <div className="mt-5 overflow-x-auto rounded-md border border-[var(--border-subtle)]">
+            <table className="w-full min-w-[720px] text-left text-sm">
+              <thead className="bg-[var(--bg-elevated)] text-xs font-extrabold uppercase text-[var(--text-muted)]">
+                <tr>
+                  <th className="px-4 py-3">Computer</th>
+                  <th className="px-4 py-3">Device ID</th>
+                  <th className="px-4 py-3">Last Connected</th>
+                  <th className="px-4 py-3">Status</th>
+                  <th className="px-4 py-3 text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-[var(--border-subtle)]">
+                {syncDevices.map((device) => (
+                  <tr key={device.id} className="bg-[var(--bg-surface)]">
+                    <td className="px-4 py-3 font-extrabold text-[var(--text-primary)]">{device.name}</td>
+                    <td className="px-4 py-3 font-mono text-xs text-[var(--text-secondary)]">{device.uuid}</td>
+                    <td className="px-4 py-3 text-[var(--text-secondary)]">{device.last_seen_at ? new Date(device.last_seen_at).toLocaleString() : 'Never'}</td>
+                    <td className="px-4 py-3"><Badge color={device.status === 'active' ? 'emerald' : 'slate'}>{device.status}</Badge></td>
+                    <td className="px-4 py-3">
+                      <div className="flex justify-end gap-2">
+                        <button type="button" className="icon-button" title="Generate a new secret" aria-label={`Rotate credentials for ${device.name}`} disabled={rotateSyncDeviceState.isLoading} onClick={() => rotateLocalComputer(device)}>
+                          <RefreshCw size={16} />
+                        </button>
+                        <button type="button" className="icon-button text-red-500" title="Revoke computer" aria-label={`Revoke ${device.name}`} disabled={device.status === 'revoked'} onClick={() => setSyncDeviceToRevoke(device)}>
+                          <Trash2 size={16} />
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+                {!syncDevicesLoading && syncDevices.length === 0 ? (
+                  <tr><td colSpan={5} className="px-4 py-8 text-center font-bold text-[var(--text-muted)]">No local computer is paired yet.</td></tr>
+                ) : null}
+                {syncDevicesLoading ? (
+                  <tr><td colSpan={5} className="px-4 py-8 text-center font-bold text-[var(--text-muted)]">Loading local computers...</td></tr>
+                ) : null}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      ) : null}
 
       {trainingModeLoading && !trainingMode ? (
         <FormSectionSkeleton rows={2} />
@@ -571,6 +692,41 @@ export default function SettingsPage() {
         />
       </section>
 
+      <Modal isOpen={syncDeviceModalOpen} onClose={() => setSyncDeviceModalOpen(false)} title="Add Local Computer" size="sm">
+        <div className="space-y-4">
+          <p className="text-sm leading-6 text-[var(--text-secondary)]">Name the office computer that will run WSMIS locally.</p>
+          <FormField label="Computer Name" value={syncDeviceName} onChange={(value) => setSyncDeviceName(String(value))} placeholder="Front Office Computer" required />
+        </div>
+        <div className="mt-6 flex justify-end gap-3">
+          <button type="button" className="secondary-action" onClick={() => setSyncDeviceModalOpen(false)}>Cancel</button>
+          <LoadingButton loading={createSyncDeviceState.isLoading} loadingLabel="Creating..." className="primary-action" disabled={!syncDeviceName.trim()} onClick={createLocalComputer}>
+            <Laptop size={17} /> Create Credentials
+          </LoadingButton>
+        </div>
+      </Modal>
+
+      <Modal isOpen={Boolean(syncCredentials)} onClose={() => setSyncCredentials(null)} title="Windows Installer Credentials" size="md">
+        <div className="space-y-4">
+          <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm font-bold leading-6 text-[var(--text-secondary)]">
+            The secret is shown only now. Copy these values into WSMIS Setup and keep them private.
+          </div>
+          {syncCredentials ? ([
+            ['Cloud API', syncCredentials.api_url],
+            ['Device ID', syncCredentials.device.uuid],
+            ['Device Secret', syncCredentials.secret],
+          ] as const).map(([label, value]) => (
+            <div key={label}>
+              <p className="mb-1.5 text-xs font-extrabold uppercase text-[var(--text-muted)]">{label}</p>
+              <div className="break-all rounded-md border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-3 py-2.5 font-mono text-xs text-[var(--text-primary)]">{value}</div>
+            </div>
+          )) : null}
+        </div>
+        <div className="mt-6 flex justify-end gap-3">
+          <button type="button" className="secondary-action" onClick={() => setSyncCredentials(null)}>Close</button>
+          <button type="button" className="primary-action" onClick={copySetupCredentials}><ClipboardCopy size={17} /> Copy All</button>
+        </div>
+      </Modal>
+
       <Modal isOpen={paymentModalOpen} onClose={() => setPaymentModalOpen(false)} title={paymentCurrent.id ? 'Edit Payment Method' : 'Add Payment Method'}>
         <div className="space-y-4">
           <FormField label="Name" value={paymentCurrent.name ?? ''} onChange={(val) => setPaymentCurrent({ ...paymentCurrent, name: val as string })} required />
@@ -679,6 +835,13 @@ export default function SettingsPage() {
         </div>
       </Modal>
 
+      <ConfirmDialog
+        isOpen={Boolean(syncDeviceToRevoke)}
+        onClose={() => setSyncDeviceToRevoke(null)}
+        onConfirm={revokeLocalComputer}
+        title="Revoke Local Computer"
+        message={`Revoke ${syncDeviceToRevoke?.name}? It will no longer be able to synchronize.`}
+      />
       <ConfirmDialog isOpen={Boolean(deleteTarget)} onClose={() => setDeleteTarget(null)} onConfirm={remove} title="Delete Setting" message={`Delete ${deleteTarget?.name}?`} />
     </div>
   )

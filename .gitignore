@@ -2,6 +2,7 @@
 .codex/
 test-results/
 playwright-report/
+tmp/
 
 *.log
 *.tsbuildinfo
@@ -31,3 +32,8 @@ frontend/.next/
 frontend/out/
 frontend/build/
 frontend/.codex-*.png
+
+# Windows installer build cache and generated packages
+installer/.cache/
+installer/stage/
+installer/dist/

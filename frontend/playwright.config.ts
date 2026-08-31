@@ -2,7 +2,7 @@ import { defineConfig, devices } from '@playwright/test'
 
 export default defineConfig({
   testDir: './tests',
-  outputDir: 'C:/Users/Yaftom/Desktop/WSMIS/test-results/playwright',
+  outputDir: './test-results/playwright',
   timeout: 120_000,
   workers: 1,
   expect: {

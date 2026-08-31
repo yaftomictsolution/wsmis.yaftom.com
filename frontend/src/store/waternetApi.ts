@@ -1675,6 +1675,61 @@ export type TrainingResetProgress = {
   total_tables: number
 }
 
+export type SyncRunProgress = {
+  run_uuid: string
+  status: 'running' | 'completed' | 'completed_with_warnings' | 'failed'
+  stage: 'prepare' | 'detect' | 'push' | 'pull' | 'verify' | 'complete'
+  progress: number
+  counts: Record<string, number | boolean | string[]>
+  warnings: string[]
+  error?: string | null
+  started_at?: string | null
+  completed_at?: string | null
+}
+
+export type SyncStatus = {
+  enabled: boolean
+  mode: 'standalone' | 'local' | 'cloud'
+  configured: boolean
+  node_uuid: string
+  installation_uuid: string
+  pending_changes: number
+  open_conflicts: number
+  last_sync_at?: string | null
+  last_verified_at?: string | null
+  last_error?: string | null
+  writer_mode: 'local' | 'cloud'
+  lease_expires_at?: string | null
+  latest_run?: SyncRunProgress | null
+}
+
+export type SyncConflict = {
+  id: number
+  conflict_uuid: string
+  entity_uuid: string
+  table_name: string
+  local_version: number
+  remote_version: number
+  reason: string
+  detected_at: string
+}
+
+export type SyncDevice = {
+  id: number
+  uuid: string
+  name: string
+  status: 'active' | 'revoked'
+  last_seen_at?: string | null
+  last_ip?: string | null
+  created_at?: string | null
+}
+
+export type SyncDeviceCredentials = {
+  device: SyncDevice
+  secret: string
+  api_url: string
+}
+
 type TrainingResetResponse = {
   message: string
   data: TrainingResetProgress
@@ -2047,6 +2102,7 @@ export const waternetApi = createApi({
     'Roles',
     'Settings',
     'TrainingMode',
+    'Sync',
     'PaymentMethods',
     'FinancialCategories',
     'CustomerChargeTypes',
@@ -2192,6 +2248,65 @@ export const waternetApi = createApi({
     advanceTrainingDataReset: builder.mutation<TrainingResetProgress, string>({
       query: (operationId) => ({ url: `/settings/training-mode/reset/${operationId}/advance`, method: 'POST' }),
       transformResponse: (response: TrainingResetResponse) => response.data,
+    }),
+    getSyncStatus: builder.query<SyncStatus, void>({
+      query: () => '/sync/status',
+      transformResponse: (response: DataResponse<SyncStatus>) => response.data,
+      providesTags: ['Sync'],
+    }),
+    startSyncRun: builder.mutation<SyncRunProgress, void>({
+      query: () => ({ url: '/sync/runs', method: 'POST' }),
+      transformResponse: (response: DataResponse<SyncRunProgress>) => response.data,
+      invalidatesTags: ['Sync'],
+    }),
+    advanceSyncRun: builder.mutation<SyncRunProgress, string>({
+      query: (runUuid) => ({ url: `/sync/runs/${runUuid}/advance`, method: 'POST' }),
+      transformResponse: (response: DataResponse<SyncRunProgress>) => response.data,
+      invalidatesTags: ['Sync'],
+    }),
+    getSyncConflicts: builder.query<SyncConflict[], void>({
+      query: () => '/sync/conflicts',
+      transformResponse: (response: DataResponse<SyncConflict[]>) => response.data,
+      providesTags: ['Sync'],
+    }),
+    resolveSyncConflict: builder.mutation<SyncConflict, { conflictUuid: string; resolution: 'use_remote' | 'keep_local' }>({
+      query: ({ conflictUuid, resolution }) => ({
+        url: `/sync/conflicts/${conflictUuid}/resolve`,
+        method: 'POST',
+        body: { resolution },
+      }),
+      transformResponse: (response: DataResponse<SyncConflict>) => response.data,
+      invalidatesTags: ['Sync'],
+    }),
+    acquireOfflineLease: builder.mutation<{ writer_mode: 'local'; lease_expires_at: string }, { force?: boolean } | void>({
+      query: (body) => ({ url: '/sync/lease/acquire', method: 'POST', body: body ?? {} }),
+      transformResponse: (response: DataResponse<{ writer_mode: 'local'; lease_expires_at: string }>) => response.data,
+      invalidatesTags: ['Sync'],
+    }),
+    releaseOfflineLease: builder.mutation<{ writer_mode: 'cloud' }, void>({
+      query: () => ({ url: '/sync/lease/release', method: 'POST' }),
+      transformResponse: (response: DataResponse<{ writer_mode: 'cloud' }>) => response.data,
+      invalidatesTags: ['Sync'],
+    }),
+    getSyncDevices: builder.query<SyncDevice[], void>({
+      query: () => '/sync/devices',
+      transformResponse: (response: DataResponse<SyncDevice[]>) => response.data,
+      providesTags: ['Sync'],
+    }),
+    createSyncDevice: builder.mutation<SyncDeviceCredentials, { name: string }>({
+      query: (body) => ({ url: '/sync/devices', method: 'POST', body }),
+      transformResponse: (response: DataResponse<SyncDeviceCredentials>) => response.data,
+      invalidatesTags: ['Sync'],
+    }),
+    rotateSyncDevice: builder.mutation<SyncDeviceCredentials, number>({
+      query: (id) => ({ url: `/sync/devices/${id}/rotate`, method: 'POST' }),
+      transformResponse: (response: DataResponse<SyncDeviceCredentials>) => response.data,
+      invalidatesTags: ['Sync'],
+    }),
+    revokeSyncDevice: builder.mutation<SyncDevice, number>({
+      query: (id) => ({ url: `/sync/devices/${id}`, method: 'DELETE' }),
+      transformResponse: (response: DataResponse<SyncDevice>) => response.data,
+      invalidatesTags: ['Sync'],
     }),
     getLeaveSettings: builder.query<LeaveSettings, void>({
       query: () => '/settings/leave',
@@ -3553,6 +3668,17 @@ export const {
   useResetTrainingDataMutation,
   useStartTrainingDataResetMutation,
   useAdvanceTrainingDataResetMutation,
+  useGetSyncStatusQuery,
+  useStartSyncRunMutation,
+  useAdvanceSyncRunMutation,
+  useGetSyncConflictsQuery,
+  useResolveSyncConflictMutation,
+  useAcquireOfflineLeaseMutation,
+  useReleaseOfflineLeaseMutation,
+  useGetSyncDevicesQuery,
+  useCreateSyncDeviceMutation,
+  useRotateSyncDeviceMutation,
+  useRevokeSyncDeviceMutation,
   useGetLeaveSettingsQuery,
   useUpdateLeaveSettingsMutation,
   useGetPaymentMethodsQuery,

@@ -1,0 +1,20 @@
+<service>
+  <id>WSMISBackend</id>
+  <name>WSMIS Application API</name>
+  <description>Local Laravel API for the Water Supply Management Information System.</description>
+  <executable>%BASE%\..\runtime\php\php.exe</executable>
+  <arguments>artisan serve --host=127.0.0.1 --port=8000 --tries=1 --no-reload --no-interaction</arguments>
+  <workingdirectory>%ProgramData%\WSMIS\backend</workingdirectory>
+  <startmode>Automatic</startmode>
+  <delayedAutoStart>true</delayedAutoStart>
+  <depend>WSMISMySQL</depend>
+  <stoptimeout>20sec</stoptimeout>
+  <onfailure action="restart" delay="5 sec" />
+  <onfailure action="restart" delay="15 sec" />
+  <resetfailure>1 hour</resetfailure>
+  <logpath>%ProgramData%\WSMIS\logs</logpath>
+  <log mode="roll-by-size">
+    <sizeThreshold>10485760</sizeThreshold>
+    <keepFiles>5</keepFiles>
+  </log>
+</service>

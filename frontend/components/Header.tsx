@@ -20,6 +20,7 @@ import {
 import { useDispatch } from 'react-redux'
 
 import { useTheme } from '@/context/ThemeContext'
+import { SyncCenter } from '@/components/SyncCenter'
 import { useLanguage, type Language } from '@/context/LanguageContext'
 import { useTrainingMode } from '@/context/TrainingModeContext'
 import { useRouter } from 'next/navigation'
@@ -191,6 +192,13 @@ export function Header() {
   const canManageMeters = canSee(['Manager', 'Technician', 'Warehouse Officer'], ['meters.view'])
   const canSeePayments = canSee(['Manager', 'Accountant', 'Collector'], ['payments.view'])
   const canManageDeposits = canSee(['Manager', 'Accountant', 'Collector'], ['customer-deposits.view', 'customer-deposits.update'])
+  const normalizedRoles = currentRoles.map((role) => role.trim().toLowerCase())
+  const canViewSync = hasToken && (
+    normalizedRoles.length === 0 ||
+    normalizedRoles.some((role) => ['admin', 'super admin', 'manager', 'مدیر', 'مدیر سیستم', 'مدیر مالی'].includes(role)) ||
+    currentPermissions.some((permission) => ['sync.view', 'sync.manage', 'settings.update'].includes(permission))
+  )
+  const canManageSync = normalizedRoles.some((role) => ['admin', 'super admin'].includes(role)) || currentPermissions.includes('sync.manage')
 
   useEffect(() => {
     const update = () => setTime(new Date().toLocaleTimeString([], { hour12: false }))
@@ -639,6 +647,8 @@ export function Header() {
             </div>
           ) : null}
         </div>
+
+        <SyncCenter canView={canViewSync} canManage={canManageSync} />
 
         <div ref={notificationMenuRef} className="relative">
           <button

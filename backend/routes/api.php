@@ -33,6 +33,7 @@ use App\Http\Controllers\Api\InvoiceController;
 use App\Http\Controllers\Api\LeavePolicyController;
 use App\Http\Controllers\Api\LeaveRequestController;
 use App\Http\Controllers\Api\LeaveSettingsController;
+use App\Http\Controllers\Api\LocalSyncController;
 use App\Http\Controllers\Api\MeterAssignmentController;
 use App\Http\Controllers\Api\MeterController;
 use App\Http\Controllers\Api\MeterReadingController;
@@ -45,12 +46,14 @@ use App\Http\Controllers\Api\PayrollDeductionController;
 use App\Http\Controllers\Api\PayrollReportController;
 use App\Http\Controllers\Api\PerformanceReviewController;
 use App\Http\Controllers\Api\RoleController;
+use App\Http\Controllers\Api\RemoteSyncController;
 use App\Http\Controllers\Api\SalaryAdvanceController;
 use App\Http\Controllers\Api\ServiceAreaController;
 use App\Http\Controllers\Api\SettingController;
 use App\Http\Controllers\Api\ShareholderController;
 use App\Http\Controllers\Api\ShareholderDistributionController;
 use App\Http\Controllers\Api\SupplierController;
+use App\Http\Controllers\Api\SyncDeviceController;
 use App\Http\Controllers\Api\TrainingModeController;
 use App\Http\Controllers\Api\UserController;
 use App\Http\Controllers\Api\WorkScheduleController;
@@ -58,10 +61,33 @@ use Illuminate\Support\Facades\Route;
 
 Route::post('auth/login', [AuthController::class, 'login']);
 
+Route::prefix('sync/remote')->middleware('sync.device')->group(function (): void {
+    Route::get('handshake', [RemoteSyncController::class, 'handshake']);
+    Route::post('push', [RemoteSyncController::class, 'push']);
+    Route::get('pull', [RemoteSyncController::class, 'pull']);
+    Route::get('manifest', [RemoteSyncController::class, 'manifest']);
+    Route::post('file', [RemoteSyncController::class, 'uploadFile']);
+    Route::get('file', [RemoteSyncController::class, 'downloadFile']);
+    Route::post('lease/acquire', [RemoteSyncController::class, 'acquireLease']);
+    Route::post('lease/release', [RemoteSyncController::class, 'releaseLease']);
+});
+
 Route::middleware('auth:sanctum')->group(function (): void {
     Route::get('auth/me', [AuthController::class, 'me']);
     Route::put('auth/profile', [AuthController::class, 'updateProfile']);
     Route::post('auth/logout', [AuthController::class, 'logout']);
+
+    Route::get('sync/status', [LocalSyncController::class, 'status']);
+    Route::post('sync/runs', [LocalSyncController::class, 'start']);
+    Route::post('sync/runs/{syncRun}/advance', [LocalSyncController::class, 'advance']);
+    Route::get('sync/conflicts', [LocalSyncController::class, 'conflicts']);
+    Route::post('sync/conflicts/{syncConflict}/resolve', [LocalSyncController::class, 'resolve']);
+    Route::post('sync/lease/acquire', [LocalSyncController::class, 'acquireLease']);
+    Route::post('sync/lease/release', [LocalSyncController::class, 'releaseLease']);
+    Route::get('sync/devices', [SyncDeviceController::class, 'index']);
+    Route::post('sync/devices', [SyncDeviceController::class, 'store']);
+    Route::post('sync/devices/{syncDevice}/rotate', [SyncDeviceController::class, 'rotate']);
+    Route::delete('sync/devices/{syncDevice}', [SyncDeviceController::class, 'destroy']);
 
     Route::get('notifications', [NotificationController::class, 'index']);
     Route::post('notifications/read-all', [NotificationController::class, 'markAllRead']);
