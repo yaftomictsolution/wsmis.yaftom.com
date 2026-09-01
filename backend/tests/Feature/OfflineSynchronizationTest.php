@@ -650,6 +650,67 @@ class OfflineSynchronizationTest extends TestCase
         $this->assertSame(2, app(SyncNodeManager::class)->state()->remote_cursor);
     }
 
+    public function test_fresh_local_provisioning_rebases_equivalent_ignored_metadata(): void
+    {
+        config()->set('sync.ignored_columns.service_areas', ['updated_at']);
+        $deviceUuid = (string) Str::uuid();
+        $cloudNodeUuid = (string) Str::uuid();
+        $installationUuid = (string) Str::uuid();
+        $entityUuid = (string) Str::uuid();
+        $area = $this->area('Metadata Rebase Area');
+        $payload = (array) DB::table('service_areas')->where('id', $area->id)->first();
+        unset($payload['id']);
+        $historicalChecksum = app(SyncCatalog::class)->checksum($payload, []);
+        $canonicalPayload = $payload;
+        unset($canonicalPayload['updated_at']);
+        $canonicalChecksum = app(SyncCatalog::class)->checksum($canonicalPayload, []);
+        $change = $this->change($entityUuid, $deviceUuid, 'create', 0, 1, $payload);
+        $change['checksum'] = $historicalChecksum;
+        $change['sequence'] = 1;
+        $line = implode(':', [$entityUuid, 1, $canonicalChecksum, 'active']);
+        $tableHash = hash('sha256', $line);
+        $manifest = [
+            'tables' => [
+                'service_areas' => [
+                    'active' => 1,
+                    'deleted' => 0,
+                    'hash' => $tableHash,
+                ],
+            ],
+            'root_hash' => hash('sha256', 'service_areas:'.$tableHash),
+        ];
+
+        $this->configureLocalClient($deviceUuid);
+        Http::fake(function ($request) use ($cloudNodeUuid, $installationUuid, $change, $manifest) {
+            if (str_ends_with($request->url(), '/sync/remote/handshake')) {
+                return Http::response(['data' => [
+                    'protocol_version' => 1,
+                    'node_uuid' => $cloudNodeUuid,
+                    'installation_uuid' => $installationUuid,
+                    'latest_cursor' => 1,
+                    'writer_mode' => 'cloud',
+                ]]);
+            }
+            if (str_contains($request->url(), '/sync/remote/pull')) {
+                return Http::response(['data' => [
+                    'changes' => [$change],
+                    'next_cursor' => 1,
+                    'has_more' => false,
+                ]]);
+            }
+            if (str_ends_with($request->url(), '/sync/remote/manifest')) {
+                return Http::response(['data' => $manifest]);
+            }
+
+            return Http::response(['message' => 'Unexpected test URL'], 500);
+        });
+
+        $this->artisan('sync:provision-local --force')->assertSuccessful();
+
+        $this->assertSame($canonicalChecksum, SyncEntity::query()->sole()->checksum);
+        $this->assertDatabaseCount('sync_changes', 0);
+    }
+
     public function test_online_record_created_while_local_computer_was_off_is_downloaded_on_next_sync(): void
     {
         $deviceUuid = (string) Str::uuid();

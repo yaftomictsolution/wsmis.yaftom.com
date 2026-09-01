@@ -2,6 +2,7 @@
 
 namespace App\Services\Sync;
 
+use App\Models\SyncEntity;
 use App\Models\SyncNodeState;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
@@ -115,6 +116,7 @@ class FreshLocalProvisioner
 
         $comparison = null;
         for ($attempt = 1; $attempt <= 4; $attempt++) {
+            $this->canonicalizeEquivalentMetadata();
             $notify(92, $attempt === 1
                 ? 'Verifying local data against the cloud'
                 : 'Verifying cloud changes received during setup');
@@ -172,6 +174,41 @@ class FreshLocalProvisioner
         $unresolved = DB::table('sync_deferred_relations')->count();
         if ($unresolved > 0) {
             throw new RuntimeException("{$unresolved} required record relationships could not be restored.");
+        }
+    }
+
+    private function canonicalizeEquivalentMetadata(): void
+    {
+        foreach ($this->catalog->tables() as $table) {
+            SyncEntity::query()
+                ->where('table_name', $table)
+                ->whereNotNull('record_id')
+                ->whereNull('deleted_at')
+                ->orderBy('id')
+                ->each(function (SyncEntity $entity) use ($table): void {
+                    $row = DB::table($table)->where('id', $entity->record_id)->first();
+                    if (! $row) {
+                        return;
+                    }
+
+                    $portable = $this->catalog->portableSnapshot($table, $row);
+                    $checksum = $this->catalog->checksum($portable['payload'], $portable['relationships']);
+                    if ($entity->checksum === $checksum) {
+                        return;
+                    }
+
+                    $snapshot = [
+                        'payload' => $portable['payload'],
+                        'relationships' => $portable['relationships'],
+                        'files' => $this->files->descriptors($table, $portable['payload']),
+                    ];
+                    if ($this->catalog->snapshotsEquivalent($table, $entity->snapshot ?? [], $snapshot)) {
+                        $entity->forceFill([
+                            'checksum' => $checksum,
+                            'snapshot' => $snapshot,
+                        ])->save();
+                    }
+                });
         }
     }
 
