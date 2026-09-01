@@ -159,7 +159,7 @@ var
   CloudApi: String;
   DeviceId: String;
   DeviceSecret: String;
-  ErrorDetails: String;
+  ErrorDetails: AnsiString;
   ResultCode: Integer;
 begin
   if CurStep <> ssPostInstall then
@@ -212,7 +212,7 @@ begin
       ErrorDetails := 'Open the setup log for the exact reason.';
     MsgBox(
       'WSMIS could not be configured.' + #13#10 + #13#10 +
-      Trim(ErrorDetails) + #13#10 + #13#10 +
+      Trim(String(ErrorDetails)) + #13#10 + #13#10 +
       'Details: ' + ExpandConstant('{commonappdata}\WSMIS\setup-error.txt'),
       mbError, MB_OK
     );
