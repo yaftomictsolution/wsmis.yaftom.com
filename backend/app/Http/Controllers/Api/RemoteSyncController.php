@@ -65,6 +65,7 @@ class RemoteSyncController extends Controller
             ->each(fn (array $change) => abort_unless($change['source_node_uuid'] === $device->uuid, 422, 'Change source does not match the authenticated device.'))
             ->sortBy(function (array $change): int {
                 $rank = $this->catalog->rank($change['table_name']);
+
                 return $change['operation'] === 'delete' ? 100000 - $rank : $rank;
             });
 
@@ -82,6 +83,7 @@ class RemoteSyncController extends Controller
         $data = $request->validate([
             'cursor' => ['nullable', 'integer', 'min:0'],
             'limit' => ['nullable', 'integer', 'min:1', 'max:500'],
+            'include_own' => ['nullable', 'boolean'],
         ]);
         $this->detector->detect();
 
@@ -89,10 +91,11 @@ class RemoteSyncController extends Controller
         $device = $request->attributes->get('sync_device');
         $cursor = (int) ($data['cursor'] ?? 0);
         $limit = (int) ($data['limit'] ?? config('sync.batch_size', 100));
+        $includeOwn = (bool) ($data['include_own'] ?? false);
         $scanned = SyncChange::query()->where('id', '>', $cursor)->orderBy('id')->limit($limit)->get();
         $nextCursor = (int) ($scanned->max('id') ?? $cursor);
         $changes = $scanned
-            ->reject(fn (SyncChange $change): bool => $change->source_node_uuid === $device->uuid)
+            ->reject(fn (SyncChange $change): bool => ! $includeOwn && $change->source_node_uuid === $device->uuid)
             ->map->toProtocolArray()
             ->values();
 

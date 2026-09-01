@@ -354,6 +354,11 @@ class OfflineSynchronizationTest extends TestCase
             ->assertOk()
             ->assertJsonCount(0, 'data.changes');
 
+        $this->withHeaders($this->deviceHeaders($deviceA->uuid, 'secret-a'))
+            ->getJson('/api/sync/remote/pull?cursor=0&limit=100&include_own=1')
+            ->assertOk()
+            ->assertJsonPath('data.changes.0.entity_uuid', $change['entity_uuid']);
+
         $pullForB = $this->withHeaders($this->deviceHeaders($deviceB->uuid, 'secret-b'))
             ->getJson('/api/sync/remote/pull?cursor=0&limit=100')
             ->assertOk();
@@ -508,7 +513,7 @@ class OfflineSynchronizationTest extends TestCase
         $cloudNodeUuid = (string) Str::uuid();
         $installationUuid = (string) Str::uuid();
         $entityUuid = (string) Str::uuid();
-        $change = $this->change($entityUuid, $cloudNodeUuid, 'create', 0, 1, [
+        $change = $this->change($entityUuid, $deviceUuid, 'create', 0, 1, [
             'name' => 'Downloaded Cloud Area',
         ]);
         $change['sequence'] = 1;
@@ -539,6 +544,8 @@ class OfflineSynchronizationTest extends TestCase
                 ]]);
             }
             if (str_contains($request->url(), '/sync/remote/pull')) {
+                $this->assertStringContainsString('include_own=1', $request->url());
+
                 return Http::response(['data' => [
                     'changes' => [$change],
                     'next_cursor' => 1,
@@ -566,6 +573,81 @@ class OfflineSynchronizationTest extends TestCase
         $this->assertSame(1, $state->remote_cursor);
         $this->assertNotNull($state->initialized_at);
         $this->assertNotNull($state->last_verified_at);
+    }
+
+    public function test_fresh_local_provisioning_catches_up_with_cloud_changes_created_during_download(): void
+    {
+        $deviceUuid = (string) Str::uuid();
+        $cloudNodeUuid = (string) Str::uuid();
+        $installationUuid = (string) Str::uuid();
+        $firstEntityUuid = (string) Str::uuid();
+        $secondEntityUuid = (string) Str::uuid();
+        $first = $this->change($firstEntityUuid, $deviceUuid, 'create', 0, 1, ['name' => 'Initial Cloud Area']);
+        $second = $this->change($secondEntityUuid, $cloudNodeUuid, 'create', 0, 1, ['name' => 'Area Added During Setup']);
+        $first['sequence'] = 1;
+        $second['sequence'] = 2;
+
+        $lines = collect([$first, $second])
+            ->sortBy('entity_uuid')
+            ->map(fn (array $change): string => implode(':', [
+                $change['entity_uuid'],
+                1,
+                $change['checksum'],
+                'active',
+            ]));
+        $tableHash = hash('sha256', $lines->implode('|'));
+        $manifest = [
+            'tables' => [
+                'service_areas' => [
+                    'active' => 2,
+                    'deleted' => 0,
+                    'hash' => $tableHash,
+                ],
+            ],
+            'root_hash' => hash('sha256', 'service_areas:'.$tableHash),
+        ];
+        $pulls = 0;
+
+        $this->configureLocalClient($deviceUuid);
+        Http::fake(function ($request) use (
+            $cloudNodeUuid,
+            $installationUuid,
+            $first,
+            $second,
+            $manifest,
+            &$pulls,
+        ) {
+            if (str_ends_with($request->url(), '/sync/remote/handshake')) {
+                return Http::response(['data' => [
+                    'protocol_version' => 1,
+                    'node_uuid' => $cloudNodeUuid,
+                    'installation_uuid' => $installationUuid,
+                    'latest_cursor' => 1,
+                    'writer_mode' => 'cloud',
+                ]]);
+            }
+            if (str_contains($request->url(), '/sync/remote/pull')) {
+                $pulls++;
+
+                return Http::response(['data' => $pulls === 1
+                    ? ['changes' => [$first], 'next_cursor' => 1, 'has_more' => false]
+                    : ['changes' => [$second], 'next_cursor' => 2, 'has_more' => false]]);
+            }
+            if (str_ends_with($request->url(), '/sync/remote/manifest')) {
+                return Http::response(['data' => $manifest]);
+            }
+
+            return Http::response(['message' => 'Unexpected test URL'], 500);
+        });
+
+        $this->artisan('sync:provision-local --force')->assertSuccessful();
+
+        $this->assertSame(2, $pulls);
+        $this->assertSame(
+            ['Area Added During Setup', 'Initial Cloud Area'],
+            ServiceArea::query()->orderBy('name')->pluck('name')->all(),
+        );
+        $this->assertSame(2, app(SyncNodeManager::class)->state()->remote_cursor);
     }
 
     public function test_online_record_created_while_local_computer_was_off_is_downloaded_on_next_sync(): void

@@ -25,6 +25,30 @@ function Get-WSMISEnvValue {
     return $value
 }
 
+function Set-WSMISEnvValue {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][string]$Value
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        throw "The WSMIS environment file was not found at $Path"
+    }
+
+    $escapedValue = $Value.Replace('"', '\"')
+    $replacement = "$Name=`"$escapedValue`""
+    $content = Get-Content -LiteralPath $Path -Raw
+    $pattern = '(?m)^' + [regex]::Escape($Name) + '=.*$'
+    if ([regex]::IsMatch($content, $pattern)) {
+        $content = [regex]::Replace($content, $pattern, $replacement)
+    } else {
+        $content = $content.TrimEnd() + "`r`n$replacement`r`n"
+    }
+
+    Set-Content -LiteralPath $Path -Value $content -Encoding ASCII
+}
+
 function New-WSMISSecret {
     param([int]$Length = 40)
 
@@ -55,6 +79,34 @@ function Invoke-WSMISNative {
     & $Executable @Arguments
     if ($LASTEXITCODE -ne 0) {
         throw "$FailureMessage Exit code: $LASTEXITCODE"
+    }
+}
+
+function Invoke-WSMISNativeWithDetails {
+    param(
+        [Parameter(Mandatory = $true)][string]$Executable,
+        [Parameter()][string[]]$Arguments = @(),
+        [Parameter()][string]$FailureMessage = 'A required program failed.'
+    )
+
+    $output = @(& $Executable @Arguments 2>&1)
+    $exitCode = $LASTEXITCODE
+    $output | ForEach-Object { Write-Output $_ }
+
+    if ($exitCode -ne 0) {
+        $details = $output |
+            ForEach-Object { $_.ToString().Trim() } |
+            Where-Object { $_ } |
+            Select-Object -Last 8
+        $detailText = ($details -join ' ')
+        if ($detailText.Length -gt 1400) {
+            $detailText = $detailText.Substring($detailText.Length - 1400)
+        }
+        if ($detailText) {
+            throw "$FailureMessage $detailText"
+        }
+
+        throw "$FailureMessage Exit code: $exitCode"
     }
 }
 

@@ -159,6 +159,7 @@ var
   CloudApi: String;
   DeviceId: String;
   DeviceSecret: String;
+  ErrorDetails: String;
   ResultCode: Integer;
 begin
   if CurStep <> ssPostInstall then
@@ -207,9 +208,12 @@ begin
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode
   ) or (ResultCode <> 0) then
   begin
+    if not LoadStringFromFile(ExpandConstant('{commonappdata}\WSMIS\setup-error.txt'), ErrorDetails) then
+      ErrorDetails := 'Open the setup log for the exact reason.';
     MsgBox(
-      'WSMIS could not be configured. No cloud data was marked ready.' + #13#10 + #13#10 +
-      'Open ' + ExpandConstant('{commonappdata}\WSMIS\setup-error.txt') + ' for the exact reason, then run Setup again.',
+      'WSMIS could not be configured.' + #13#10 + #13#10 +
+      Trim(ErrorDetails) + #13#10 + #13#10 +
+      'Details: ' + ExpandConstant('{commonappdata}\WSMIS\setup-error.txt'),
       mbError, MB_OK
     );
     RaiseException('WSMIS setup failed.');

@@ -61,51 +61,77 @@ class FreshLocalProvisioner
         $latestCursor = max(0, (int) ($handshake['latest_cursor'] ?? 0));
         $batchSize = max(10, (int) config('sync.batch_size', 100));
 
-        do {
-            $batch = $this->remote->pull($cursor, $batchSize);
-            $changes = $batch['changes'] ?? [];
-            foreach ($changes as $change) {
-                foreach ($change['files'] ?? [] as $descriptor) {
-                    if (! $this->files->hasExpectedFile($descriptor)) {
-                        $this->remote->downloadFile($descriptor);
-                        $downloadedFiles++;
+        $downloadAvailable = function (bool $showProgress = true) use (
+            &$cursor,
+            &$pulled,
+            &$downloadedFiles,
+            $batchSize,
+            $latestCursor,
+            $state,
+            $notify,
+        ): void {
+            do {
+                // A replacement installation may reuse a registered device. Its complete
+                // history is required because the new local database starts empty.
+                $batch = $this->remote->pull($cursor, $batchSize, true);
+                $changes = $batch['changes'] ?? [];
+                foreach ($changes as $change) {
+                    foreach ($change['files'] ?? [] as $descriptor) {
+                        if (! $this->files->hasExpectedFile($descriptor)) {
+                            $this->remote->downloadFile($descriptor);
+                            $downloadedFiles++;
+                        }
                     }
+
+                    $result = $this->applier->apply($change, false, false);
+                    if (($result['status'] ?? null) !== 'accepted') {
+                        throw new RuntimeException(
+                            "Cloud baseline record {$change['table_name']} could not be installed: "
+                            .($result['reason'] ?? 'unknown synchronization error')
+                        );
+                    }
+                    $pulled++;
                 }
 
-                $result = $this->applier->apply($change, false, false);
-                if (($result['status'] ?? null) !== 'accepted') {
-                    throw new RuntimeException(
-                        "Cloud baseline record {$change['table_name']} could not be installed: "
-                        .($result['reason'] ?? 'unknown synchronization error')
-                    );
+                $nextCursor = (int) ($batch['next_cursor'] ?? $cursor);
+                $hasMore = (bool) ($batch['has_more'] ?? false);
+                if ($hasMore && $nextCursor <= $cursor) {
+                    throw new RuntimeException('The cloud synchronization cursor did not advance.');
                 }
-                $pulled++;
+                $cursor = $nextCursor;
+                $state->forceFill(['remote_cursor' => $cursor])->save();
+                $this->applier->resolveDeferredRelations();
+
+                if ($showProgress) {
+                    $denominator = max(1, $latestCursor);
+                    $percentage = min(88, 10 + (int) floor(($cursor / $denominator) * 78));
+                    $notify($percentage, "Downloading cloud records ({$pulled} installed)");
+                }
+            } while ($hasMore);
+        };
+
+        $downloadAvailable();
+        $this->assertRelationshipsResolved();
+
+        $comparison = null;
+        for ($attempt = 1; $attempt <= 4; $attempt++) {
+            $notify(92, $attempt === 1
+                ? 'Verifying local data against the cloud'
+                : 'Verifying cloud changes received during setup');
+            $comparison = $this->integrity->compare($this->remote->manifest());
+            if ($comparison['consistent']) {
+                break;
             }
 
-            $nextCursor = (int) ($batch['next_cursor'] ?? $cursor);
-            $hasMore = (bool) ($batch['has_more'] ?? false);
-            if ($hasMore && $nextCursor <= $cursor) {
-                throw new RuntimeException('The cloud synchronization cursor did not advance.');
+            if ($attempt < 4) {
+                $notify(94, 'Downloading changes created while setup was running');
+                $downloadAvailable(false);
+                $this->assertRelationshipsResolved();
             }
-            $cursor = $nextCursor;
-            $state->forceFill(['remote_cursor' => $cursor])->save();
-            $this->applier->resolveDeferredRelations();
-
-            $denominator = max(1, $latestCursor);
-            $percentage = min(88, 10 + (int) floor(($cursor / $denominator) * 78));
-            $notify($percentage, "Downloading cloud records ({$pulled} installed)");
-        } while ($hasMore);
-
-        $unresolved = DB::table('sync_deferred_relations')->count();
-        if ($unresolved > 0) {
-            throw new RuntimeException("{$unresolved} required record relationships could not be restored.");
         }
 
-        $notify(92, 'Verifying local data against the cloud');
-        $remoteManifest = $this->remote->manifest();
-        $comparison = $this->integrity->compare($remoteManifest);
-        if (! $comparison['consistent']) {
-            $differentTables = implode(', ', array_keys($comparison['differences']));
+        if (! $comparison || ! $comparison['consistent']) {
+            $differentTables = implode(', ', array_keys($comparison['differences'] ?? []));
             throw new RuntimeException(
                 'The downloaded local database failed its cloud integrity check.'
                 .($differentTables !== '' ? " Different tables: {$differentTables}." : '')
@@ -138,6 +164,14 @@ class FreshLocalProvisioner
         }
         if (! $this->remote->configured() || ! Str::isUuid((string) config('sync.device_uuid'))) {
             throw new RuntimeException('Valid local-computer pairing credentials are required.');
+        }
+    }
+
+    private function assertRelationshipsResolved(): void
+    {
+        $unresolved = DB::table('sync_deferred_relations')->count();
+        if ($unresolved > 0) {
+            throw new RuntimeException("{$unresolved} required record relationships could not be restored.");
         }
     }
 

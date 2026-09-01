@@ -72,10 +72,17 @@ try {
     }
     $setup = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
     $freshInstall = -not (Test-Path -LiteralPath $InstallStatePath)
+    $providedPairing = [bool]($setup.cloud_api -and $setup.device_uuid -and $setup.device_secret)
 
     if ($freshInstall) {
-        if (-not $setup.cloud_api -or -not $setup.device_uuid -or -not $setup.device_secret) {
-            throw 'Cloud API, Device ID, and Device Secret are required for a new local installation.'
+        if (-not $providedPairing -and (Test-Path -LiteralPath $EnvPath)) {
+            $setup.cloud_api = Get-WSMISEnvValue -Path $EnvPath -Name 'SYNC_REMOTE_URL'
+            $setup.device_uuid = Get-WSMISEnvValue -Path $EnvPath -Name 'SYNC_DEVICE_UUID'
+            $setup.device_secret = Get-WSMISEnvValue -Path $EnvPath -Name 'SYNC_DEVICE_SECRET'
+            $providedPairing = [bool]($setup.cloud_api -and $setup.device_uuid -and $setup.device_secret)
+        }
+        if (-not $providedPairing) {
+            throw 'Cloud API, Device ID, and Device Secret are required. Open Settings > Local Computers online and copy all three values.'
         }
         $parsedDeviceId = [guid]::Empty
         if (-not [guid]::TryParse([string]$setup.device_uuid, [ref]$parsedDeviceId)) {
@@ -83,7 +90,17 @@ try {
         }
     }
 
-    Assert-WSMISPortAvailable -Port 3307
+    foreach ($serviceName in @('WSMISFrontend', 'WSMISBackend', 'WSMISMySQL')) {
+        $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+        if ($service -and $service.Status -ne 'Stopped') {
+            Stop-Service -Name $serviceName -Force
+            $service.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(30))
+        }
+    }
+
+    if (-not (Get-Service -Name 'WSMISMySQL' -ErrorAction SilentlyContinue)) {
+        Assert-WSMISPortAvailable -Port 3307
+    }
     Assert-WSMISPortAvailable -Port 8000
     Assert-WSMISPortAvailable -Port 3000
     Set-WSMISPhpTlsConfig
@@ -210,6 +227,13 @@ SYNC_LEASE_HOURS=72
         Protect-WSMISSecretFile -Path $EnvPath
     }
 
+    if ($freshInstall -and $providedPairing) {
+        Set-WSMISEnvValue -Path $EnvPath -Name 'SYNC_REMOTE_URL' -Value ([string]$setup.cloud_api).TrimEnd('/')
+        Set-WSMISEnvValue -Path $EnvPath -Name 'SYNC_DEVICE_UUID' -Value ([string]$setup.device_uuid)
+        Set-WSMISEnvValue -Path $EnvPath -Name 'SYNC_DEVICE_SECRET' -Value ([string]$setup.device_secret)
+        Protect-WSMISSecretFile -Path $EnvPath
+    }
+
     if (-not $freshInstall) {
         Write-WSMISProgress -DataRoot $DataRoot -Progress 22 -Message 'Creating an upgrade safety backup'
         & (Join-Path $PSScriptRoot 'Backup-WSMIS.ps1') -Destination (Join-Path $DataRoot 'backups') | Out-Null
@@ -228,7 +252,7 @@ SYNC_LEASE_HOURS=72
 
         if ($freshInstall) {
             Write-WSMISProgress -DataRoot $DataRoot -Progress 42 -Message 'Downloading and verifying the cloud database'
-            Invoke-WSMISNative -Executable $php -Arguments @('artisan', 'sync:provision-local', '--force', '--no-interaction') -FailureMessage 'Unable to provision this computer from the cloud.'
+            Invoke-WSMISNativeWithDetails -Executable $php -Arguments @('artisan', 'sync:provision-local', '--force', '--no-interaction') -FailureMessage 'Unable to provision this computer from the cloud.'
         }
 
         Write-WSMISProgress -DataRoot $DataRoot -Progress 70 -Message 'Optimizing the local application'

@@ -31,11 +31,12 @@ class RemoteSyncClient
         ]));
     }
 
-    public function pull(int $cursor, int $limit): array
+    public function pull(int $cursor, int $limit, bool $includeOwn = false): array
     {
         return $this->json($this->request()->get($this->url('/sync/remote/pull'), [
             'cursor' => $cursor,
             'limit' => $limit,
+            'include_own' => $includeOwn,
         ]));
     }
 
