@@ -23,6 +23,7 @@ import {
   useAdvanceSyncRunMutation,
   useGetSyncConflictsQuery,
   useGetSyncStatusQuery,
+  useRepairCloudSyncQueueMutation,
   useReleaseOfflineLeaseMutation,
   useResolveSyncConflictMutation,
   useStartSyncRunMutation,
@@ -52,6 +53,7 @@ export function SyncCenter({ canView, canManage = false }: { canView: boolean; c
   const [online, setOnline] = useState(true)
   const [run, setRun] = useState<SyncRunProgress | null>(null)
   const [error, setError] = useState('')
+  const [notice, setNotice] = useState('')
   const [confirmAction, setConfirmAction] = useState<ConfirmAction | null>(null)
   const { data: status, error: statusError, isLoading: statusLoading, refetch } = useGetSyncStatusQuery(undefined, {
     skip: !canView,
@@ -63,6 +65,7 @@ export function SyncCenter({ canView, canManage = false }: { canView: boolean; c
   })
   const [startSync, startState] = useStartSyncRunMutation()
   const [advanceSync] = useAdvanceSyncRunMutation()
+  const [repairCloudQueue, repairCloudQueueState] = useRepairCloudSyncQueueMutation()
   const [resolveConflict] = useResolveSyncConflictMutation()
   const [acquireLease] = useAcquireOfflineLeaseMutation()
   const [releaseLease] = useReleaseOfflineLeaseMutation()
@@ -80,10 +83,12 @@ export function SyncCenter({ canView, canManage = false }: { canView: boolean; c
 
   const activeRun = run ?? (status?.latest_run?.status === 'running' ? status.latest_run : null)
   const syncReady = Boolean(status?.enabled)
-  const busy = syncReady && (startState.isLoading || run?.status === 'running')
+  const busy = syncReady && (startState.isLoading || repairCloudQueueState.isLoading || run?.status === 'running')
   const resumable = !run && activeRun?.status === 'running'
   const attention = (status?.pending_changes ?? 0) + (status?.open_conflicts ?? 0)
-  const healthy = status?.last_sync_at && attention === 0 && !status.last_error
+  const healthy = status?.mode === 'cloud'
+    ? attention === 0 && !status.last_error
+    : Boolean(status?.last_sync_at && attention === 0 && !status.last_error)
   const stageLabels = useMemo<Record<string, string>>(() => fa ? {
     prepare: 'بررسی اتصال امن',
     detect: 'یافتن تغییرات محلی',
@@ -172,6 +177,19 @@ export function SyncCenter({ canView, canManage = false }: { canView: boolean; c
       setError(errorMessage(syncError))
       await refetch()
       throw syncError
+    }
+  }
+
+  const repairCloudStatus = async () => {
+    setError('')
+    setNotice('')
+    try {
+      const result = await repairCloudQueue().unwrap()
+      setNotice(result.message)
+      await refetch()
+    } catch (repairError) {
+      setError(errorMessage(repairError))
+      await refetch()
     }
   }
 
@@ -292,6 +310,12 @@ export function SyncCenter({ canView, canManage = false }: { canView: boolean; c
             </div>
           ) : null}
 
+          {notice ? (
+            <div role="status" className="rounded-lg border border-[var(--mint)]/30 bg-[var(--mint-soft)] px-4 py-3 text-sm font-bold text-[var(--mint)]">
+              {notice}
+            </div>
+          ) : null}
+
           {status.mode === 'local' ? (
             <div className="flex flex-wrap gap-2">
               <button type="button" disabled={!online || busy || !canManage} onClick={() => void runSynchronization(resumable ? activeRun : null).catch(() => undefined)} className="primary-action gap-2 disabled:cursor-not-allowed disabled:opacity-50">
@@ -319,11 +343,34 @@ export function SyncCenter({ canView, canManage = false }: { canView: boolean; c
               )}
             </div>
           ) : (
-            <div className="flex items-center gap-3 rounded-lg border border-[var(--border-subtle)] px-4 py-3 text-sm text-[var(--text-secondary)]">
+            <div className="space-y-3">
+              <div className="flex items-center gap-3 rounded-lg border border-[var(--border-subtle)] px-4 py-3 text-sm text-[var(--text-secondary)]">
               <ShieldCheck size={18} className={status.writer_mode === 'local' ? 'text-[var(--gold)]' : 'text-[var(--mint)]'} />
               {status.writer_mode === 'local'
                 ? (fa ? 'کمپیوتر دفتر در حال کار آفلاین است؛ ویرایش آنلاین موقتاً قفل است.' : 'The office computer is working offline; online editing is temporarily locked.')
                 : (fa ? 'ویرایش آنلاین فعال است.' : 'Online editing is active.')}
+              </div>
+              {status.pending_changes > 0 && canManage ? (
+                <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-[var(--gold)]/30 bg-[var(--gold-soft)] px-4 py-3">
+                  <div>
+                    <p className="text-sm font-black text-[var(--text-primary)]">{fa ? 'اصلاح وضعیت همگام‌سازی' : 'Fix Sync Status'}</p>
+                    <p className="mt-1 text-xs text-[var(--text-muted)]">
+                      {fa ? 'این تغییرات در صف قدیمی سرور است و اطلاعات اصلی سیستم را تغییر نمی‌دهد.' : 'This is a stale cloud queue notice. Fixing it does not change business records.'}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => void repairCloudStatus()}
+                    className="secondary-action gap-2 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <RefreshCw size={16} className={repairCloudQueueState.isLoading ? 'animate-spin' : ''} />
+                    {repairCloudQueueState.isLoading
+                      ? (fa ? 'در حال اصلاح...' : 'Fixing...')
+                      : (fa ? 'اصلاح اکنون' : 'Fix Now')}
+                  </button>
+                </div>
+              ) : null}
             </div>
           )}
 

@@ -50,6 +50,13 @@ class LocalSyncController extends Controller
             ->get()]);
     }
 
+    public function repairCloudQueue(Request $request): JsonResponse
+    {
+        $this->authorizeManage($request);
+
+        return response()->json(['data' => $this->sync->repairCloudQueue()]);
+    }
+
     public function resolve(Request $request, SyncConflict $syncConflict): JsonResponse
     {
         $this->authorizeManage($request);

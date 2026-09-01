@@ -3,6 +3,7 @@ import { expect, test } from '@playwright/test'
 test('administrator can run and resume local-cloud synchronization from the header', async ({ page }) => {
   let advanceCount = 0
   let writerMode: 'cloud' | 'local' = 'cloud'
+  let syncMode: 'cloud' | 'local' = 'local'
   let pendingChanges = 2
   let lastSyncAt: string | null = null
   const runUuid = '11111111-1111-4111-a111-111111111111'
@@ -59,7 +60,7 @@ test('administrator can run and resume local-cloud synchronization from the head
     if (path.endsWith('/sync/status')) {
       await json({ data: {
         enabled: true,
-        mode: 'local',
+        mode: syncMode,
         configured: true,
         node_uuid: '22222222-2222-4222-a222-222222222222',
         installation_uuid: '33333333-3333-4333-a333-333333333333',
@@ -76,6 +77,14 @@ test('administrator can run and resume local-cloud synchronization from the head
     }
     if (path.endsWith('/sync/conflicts')) {
       await json({ data: [] })
+      return
+    }
+    if (path.endsWith('/sync/cloud-queue/repair') && request.method() === 'POST') {
+      pendingChanges = 0
+      await json({ data: {
+        acknowledged_changes: 1,
+        message: 'Sync status fixed. The cloud queue is now clean.',
+      } })
       return
     }
     if (path.endsWith('/sync/runs') && request.method() === 'POST') {
@@ -124,7 +133,7 @@ test('administrator can run and resume local-cloud synchronization from the head
     await json({ data: [] })
   })
 
-  await page.goto('/dashboard')
+  await page.goto('/dashboard', { waitUntil: 'domcontentloaded' })
   await page.getByRole('button', { name: 'Data synchronization' }).click()
   await expect(page.getByRole('heading', { name: 'Synchronization Center' })).toBeVisible()
   await expect(page.getByText('2 pending changes')).toBeVisible()
@@ -142,4 +151,14 @@ test('administrator can run and resume local-cloud synchronization from the head
   await page.getByRole('button', { name: 'Sync & Return Online' }).click()
   await page.getByRole('button', { name: 'Sync & Return Online' }).last().click()
   await expect(page.getByText('Start Offline Work')).toBeVisible()
+
+  syncMode = 'cloud'
+  pendingChanges = 1
+  lastSyncAt = null
+  await page.reload()
+  await page.getByRole('button', { name: 'Data synchronization' }).click()
+  await expect(page.getByText('Fix Sync Status')).toBeVisible()
+  await page.getByRole('button', { name: 'Fix Now' }).click()
+  await expect(page.getByText('Sync status fixed. The cloud queue is now clean.')).toBeVisible()
+  await expect(page.getByText('0 pending changes')).toBeVisible()
 })

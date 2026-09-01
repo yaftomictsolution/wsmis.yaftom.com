@@ -80,6 +80,7 @@ Route::middleware('auth:sanctum')->group(function (): void {
     Route::get('sync/status', [LocalSyncController::class, 'status']);
     Route::post('sync/runs', [LocalSyncController::class, 'start']);
     Route::post('sync/runs/{syncRun}/advance', [LocalSyncController::class, 'advance']);
+    Route::post('sync/cloud-queue/repair', [LocalSyncController::class, 'repairCloudQueue']);
     Route::get('sync/conflicts', [LocalSyncController::class, 'conflicts']);
     Route::post('sync/conflicts/{syncConflict}/resolve', [LocalSyncController::class, 'resolve']);
     Route::post('sync/lease/acquire', [LocalSyncController::class, 'acquireLease']);

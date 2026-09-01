@@ -25,6 +25,10 @@ class OfflineSyncManager
     {
         $state = $this->nodes->state();
         $latestRun = SyncRun::query()->latest('id')->first();
+        $pendingChanges = SyncChange::query()
+            ->where('source_node_uuid', $state->node_uuid)
+            ->whereNull('pushed_at')
+            ->count();
 
         return [
             'enabled' => (bool) config('sync.enabled'),
@@ -32,10 +36,10 @@ class OfflineSyncManager
             'configured' => $this->remote->configured(),
             'node_uuid' => $state->node_uuid,
             'installation_uuid' => $state->installation_uuid,
-            'pending_changes' => SyncChange::query()
-                ->where('source_node_uuid', $state->node_uuid)
-                ->whereNull('pushed_at')
-                ->count(),
+            'pending_changes' => $pendingChanges,
+            // The cloud database is the canonical source and never pushes to
+            // itself. A pending row here can only be legacy queue metadata.
+            'can_repair_cloud_queue' => $state->mode === 'cloud' && $pendingChanges > 0,
             'open_conflicts' => SyncConflict::query()->where('status', 'open')->count(),
             'last_sync_at' => optional($state->last_sync_at)->toISOString(),
             'last_verified_at' => optional($state->last_verified_at)->toISOString(),
@@ -43,6 +47,37 @@ class OfflineSyncManager
             'writer_mode' => $state->writer_mode,
             'lease_expires_at' => optional($state->lease_expires_at)->toISOString(),
             'latest_run' => $latestRun?->payload(),
+        ];
+    }
+
+    /**
+     * Acknowledge queue rows that were accidentally left pending on the cloud
+     * server. This intentionally changes sync metadata only, never business data.
+     *
+     * @return array{acknowledged_changes: int, message: string}
+     */
+    public function repairCloudQueue(): array
+    {
+        $state = $this->nodes->state();
+        if ($state->mode !== 'cloud') {
+            throw new RuntimeException('This repair is available only on the cloud server. Use Sync Now on a local computer.');
+        }
+
+        $acknowledged = SyncChange::query()
+            ->where('source_node_uuid', $state->node_uuid)
+            ->whereNull('pushed_at')
+            ->update([
+                'pushed_at' => now(),
+                'updated_at' => now(),
+            ]);
+
+        $state->forceFill(['last_error' => null])->save();
+
+        return [
+            'acknowledged_changes' => $acknowledged,
+            'message' => $acknowledged > 0
+                ? 'Sync status fixed. The cloud queue is now clean.'
+                : 'Sync status is already clean.',
         ];
     }
 

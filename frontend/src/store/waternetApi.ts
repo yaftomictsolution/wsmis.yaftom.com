@@ -1694,6 +1694,7 @@ export type SyncStatus = {
   node_uuid: string
   installation_uuid: string
   pending_changes: number
+  can_repair_cloud_queue?: boolean
   open_conflicts: number
   last_sync_at?: string | null
   last_verified_at?: string | null
@@ -1728,6 +1729,11 @@ export type SyncDeviceCredentials = {
   device: SyncDevice
   secret: string
   api_url: string
+}
+
+export type SyncCloudQueueRepair = {
+  acknowledged_changes: number
+  message: string
 }
 
 type TrainingResetResponse = {
@@ -2262,6 +2268,11 @@ export const waternetApi = createApi({
     advanceSyncRun: builder.mutation<SyncRunProgress, string>({
       query: (runUuid) => ({ url: `/sync/runs/${runUuid}/advance`, method: 'POST' }),
       transformResponse: (response: DataResponse<SyncRunProgress>) => response.data,
+      invalidatesTags: ['Sync'],
+    }),
+    repairCloudSyncQueue: builder.mutation<SyncCloudQueueRepair, void>({
+      query: () => ({ url: '/sync/cloud-queue/repair', method: 'POST' }),
+      transformResponse: (response: DataResponse<SyncCloudQueueRepair>) => response.data,
       invalidatesTags: ['Sync'],
     }),
     getSyncConflicts: builder.query<SyncConflict[], void>({
@@ -3671,6 +3682,7 @@ export const {
   useGetSyncStatusQuery,
   useStartSyncRunMutation,
   useAdvanceSyncRunMutation,
+  useRepairCloudSyncQueueMutation,
   useGetSyncConflictsQuery,
   useResolveSyncConflictMutation,
   useAcquireOfflineLeaseMutation,

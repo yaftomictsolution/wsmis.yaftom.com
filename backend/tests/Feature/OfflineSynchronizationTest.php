@@ -278,6 +278,42 @@ class OfflineSynchronizationTest extends TestCase
             ->assertJsonPath('data.status', 'revoked');
     }
 
+    public function test_admin_can_fix_a_stale_cloud_queue_without_changing_business_data(): void
+    {
+        config()->set('sync.mode', 'cloud');
+        $admin = User::factory()->create(['status' => 'active']);
+        $admin->assignRole(Role::findOrCreate('Admin'));
+        Sanctum::actingAs($admin);
+
+        $area = $this->area('Cloud Queue Safety Area');
+        $state = app(SyncNodeManager::class)->state();
+        $change = SyncChange::query()->create([
+            'change_uuid' => (string) Str::uuid(),
+            'entity_uuid' => (string) Str::uuid(),
+            'table_name' => 'users',
+            'operation' => 'update',
+            'base_version' => 1,
+            'version' => 2,
+            'payload' => ['name' => 'Legacy queue metadata'],
+            'relationships' => [],
+            'files' => [],
+            'checksum' => hash('sha256', 'legacy-queue-metadata'),
+            'source_node_uuid' => $state->node_uuid,
+        ]);
+
+        $this->postJson('/api/sync/cloud-queue/repair')
+            ->assertOk()
+            ->assertJsonPath('data.acknowledged_changes', 1)
+            ->assertJsonPath('data.message', 'Sync status fixed. The cloud queue is now clean.');
+
+        $this->assertNotNull($change->fresh()->pushed_at);
+        $this->assertSame('Cloud Queue Safety Area', ServiceArea::query()->findOrFail($area->id)->name);
+        $this->getJson('/api/sync/status')
+            ->assertOk()
+            ->assertJsonPath('data.pending_changes', 0)
+            ->assertJsonPath('data.can_repair_cloud_queue', false);
+    }
+
     public function test_cloud_push_is_idempotent_and_is_visible_to_a_different_registered_device(): void
     {
         config()->set('sync.mode', 'cloud');
