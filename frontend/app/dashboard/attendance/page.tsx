@@ -205,7 +205,7 @@ export default function AttendancePage() {
           </div>
           <div className="flex flex-wrap gap-2">
             <button type="button" onClick={() => setTab('schedule')} className={`secondary-action min-h-10 px-3 py-2 text-xs ${tab === 'schedule' ? 'border-[var(--accent)] text-[var(--accent)]' : ''}`}><CalendarClock size={15} /> Schedule & Holidays</button>
-            {canManage ? <button type="button" onClick={() => setTab('biometric')} className={`secondary-action min-h-10 px-3 py-2 text-xs ${tab === 'biometric' ? 'border-[var(--accent)] text-[var(--accent)]' : ''}`}><UploadCloud size={15} /> Biometric Import</button> : null}
+            {canManage ? <button type="button" onClick={() => setTab('biometric')} className={`secondary-action min-h-10 px-3 py-2 text-xs ${tab === 'biometric' ? 'border-[var(--accent)] text-[var(--accent)]' : ''}`}><UploadCloud size={15} /> Electronic Attendance</button> : null}
           </div>
         </div>
         {tab === 'attendance' ? <div className="grid w-full grid-cols-2 gap-2 sm:ms-auto sm:w-[328px]"><div className="min-w-0"><FormField label="From" type="date" value={from} onChange={(value) => setFrom(String(value))} /></div><div className="min-w-0"><FormField label="To" type="date" value={to} onChange={(value) => setTo(String(value))} /></div></div> : null}

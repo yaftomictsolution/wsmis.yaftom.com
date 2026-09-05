@@ -223,6 +223,8 @@ SYNC_DEVICE_SECRET=$($setup.device_secret)
 SYNC_BATCH_SIZE=100
 SYNC_REQUEST_TIMEOUT=120
 SYNC_LEASE_HOURS=72
+ATTENDANCE_DEVICE_NETWORK_ENABLED=true
+ATTENDANCE_DEVICE_NODE_BINARY=$($ProgramRoot.Replace('\', '/'))/runtime/node/node.exe
 "@ | Set-Content -LiteralPath $EnvPath -Encoding ASCII
         Protect-WSMISSecretFile -Path $EnvPath
     }
@@ -233,6 +235,10 @@ SYNC_LEASE_HOURS=72
         Set-WSMISEnvValue -Path $EnvPath -Name 'SYNC_DEVICE_SECRET' -Value ([string]$setup.device_secret)
         Protect-WSMISSecretFile -Path $EnvPath
     }
+
+    Set-WSMISEnvValue -Path $EnvPath -Name 'ATTENDANCE_DEVICE_NETWORK_ENABLED' -Value 'true'
+    Set-WSMISEnvValue -Path $EnvPath -Name 'ATTENDANCE_DEVICE_NODE_BINARY' -Value ((Join-Path $ProgramRoot 'runtime\node\node.exe').Replace('\', '/'))
+    Protect-WSMISSecretFile -Path $EnvPath
 
     if (-not $freshInstall) {
         Write-WSMISProgress -DataRoot $DataRoot -Progress 22 -Message 'Creating an upgrade safety backup'

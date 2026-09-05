@@ -171,7 +171,7 @@ Copy-Tree -Source $mysqlSource.FullName -Destination (Join-Path $ProgramStage 'r
 
 Write-Output 'Packaging the Laravel backend...'
 Copy-Tree -Source $BackendRoot -Destination $BackendStage -ExcludeDirectories @(
-    '.git', 'vendor', 'tests', 'storage'
+    '.git', 'vendor', 'tests', 'storage', 'node_modules'
 ) -ExcludeFiles @(
     '.env', '.env.*', '.phpunit.result.cache', 'phpunit.xml', '*.sql', '*.log',
     'check_*.php', 'create_*.php', 'get_token.php', 'test_*.php'
@@ -203,6 +203,18 @@ try {
     }
 } finally {
     $env:Path = $previousPath
+    Pop-Location
+}
+
+$deviceBridgeStage = Join-Path $BackendStage 'device-bridge'
+Assert-PathExists -Path (Join-Path $deviceBridgeStage 'package-lock.json') -Description 'Attendance device bridge lock file'
+Push-Location $deviceBridgeStage
+try {
+    & npm.cmd ci --omit=dev --ignore-scripts --no-audit --no-fund
+    if ($LASTEXITCODE -ne 0) {
+        throw 'The attendance device bridge dependencies could not be packaged.'
+    }
+} finally {
     Pop-Location
 }
 

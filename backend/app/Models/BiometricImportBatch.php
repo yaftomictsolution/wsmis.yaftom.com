@@ -12,13 +12,20 @@ class BiometricImportBatch extends Model
     use HasFactory;
 
     protected $fillable = [
-        'imported_by', 'batch_number', 'original_name', 'path', 'total_rows',
-        'imported_rows', 'failed_rows', 'status', 'errors',
+        'attendance_device_id', 'imported_by', 'batch_number', 'original_name', 'path', 'source',
+        'total_rows', 'imported_rows', 'skipped_rows', 'unmatched_rows', 'failed_rows', 'status', 'errors',
     ];
 
     protected function casts(): array
     {
-        return ['total_rows' => 'integer', 'imported_rows' => 'integer', 'failed_rows' => 'integer', 'errors' => 'array'];
+        return [
+            'total_rows' => 'integer',
+            'imported_rows' => 'integer',
+            'skipped_rows' => 'integer',
+            'unmatched_rows' => 'integer',
+            'failed_rows' => 'integer',
+            'errors' => 'array',
+        ];
     }
 
     public static function nextNumber(): string
@@ -31,8 +38,18 @@ class BiometricImportBatch extends Model
         return $this->belongsTo(User::class, 'imported_by');
     }
 
+    public function device(): BelongsTo
+    {
+        return $this->belongsTo(AttendanceDevice::class, 'attendance_device_id');
+    }
+
     public function attendanceRecords(): HasMany
     {
         return $this->hasMany(AttendanceRecord::class);
+    }
+
+    public function deviceEvents(): HasMany
+    {
+        return $this->hasMany(AttendanceDeviceEvent::class);
     }
 }

@@ -1135,15 +1135,102 @@ export type TerminationPreview = {
 
 export type BiometricImportBatch = {
   id: number
+  attendance_device_id?: number | null
   batch_number: string
   original_name: string
+  source?: 'legacy_csv' | 'network' | 'usb' | 'simulator'
   total_rows: number
   imported_rows: number
+  skipped_rows?: number
+  unmatched_rows?: number
   failed_rows: number
   status: 'processing' | 'completed' | 'completed_with_errors' | 'failed'
   errors?: { row: number; message: string }[]
   importer?: Pick<User, 'id' | 'name'>
+  device?: Pick<AttendanceDevice, 'id' | 'name' | 'code'>
   created_at: string
+}
+
+export type AttendanceDevice = {
+  id: number
+  name: string
+  code: string
+  vendor: string
+  model?: string | null
+  serial_number?: string | null
+  connection_mode: 'network' | 'usb' | 'simulator'
+  ip_address?: string | null
+  port: number
+  timeout_seconds: number
+  timezone: string
+  status: 'active' | 'inactive'
+  connection_status: 'unknown' | 'online' | 'offline'
+  last_seen_at?: string | null
+  last_sync_at?: string | null
+  last_punch_at?: string | null
+  last_error?: string | null
+  device_info?: Record<string, unknown> | null
+  active_mappings_count?: number
+  events_count?: number
+  unmatched_events_count?: number
+  conflict_events_count?: number
+}
+
+export type AttendanceDeviceOverview = {
+  devices: AttendanceDevice[]
+  meta: { network_connector_enabled: boolean; server_mode: string }
+}
+
+export type AttendanceDeviceMapping = {
+  id: number
+  attendance_device_id: number
+  employee_id: number
+  device_user_id: string
+  device_user_name?: string | null
+  card_number?: string | null
+  mapping_source: 'manual' | 'automatic'
+  status: 'active' | 'inactive'
+  last_seen_at?: string | null
+  employee?: Pick<Employee, 'id' | 'employee_number' | 'first_name' | 'last_name' | 'full_name' | 'biometric_id' | 'status'>
+}
+
+export type AttendanceDeviceEvent = {
+  id: number
+  attendance_device_id: number
+  employee_id?: number | null
+  attendance_record_id?: number | null
+  event_uid: string
+  device_user_id: string
+  device_user_name?: string | null
+  attendance_date: string
+  occurred_at: string
+  local_occurred_at?: string | null
+  verification_type: string
+  punch_state?: string | null
+  source: 'network' | 'usb' | 'simulator'
+  status: 'processed' | 'unmatched' | 'conflict' | 'invalid' | 'ignored' | 'processing'
+  error_message?: string | null
+  processed_at?: string | null
+  device?: Pick<AttendanceDevice, 'id' | 'name' | 'code'>
+  employee?: Pick<Employee, 'id' | 'employee_number' | 'first_name' | 'last_name' | 'full_name' | 'biometric_id'>
+  attendance_record?: Pick<AttendanceRecord, 'id' | 'attendance_date' | 'check_in' | 'check_out' | 'approval_status'>
+}
+
+export type AttendanceDeviceSyncCounts = {
+  total: number
+  created: number
+  processed: number
+  duplicates: number
+  unmatched: number
+  conflicts: number
+  invalid: number
+  errors: { row: number; message: string }[]
+}
+
+export type AttendanceDeviceSyncResult = {
+  batch: BiometricImportBatch
+  counts: AttendanceDeviceSyncCounts
+  device?: AttendanceDevice
 }
 
 export type PayrollMonthlyReport = {
@@ -2144,6 +2231,8 @@ export const waternetApi = createApi({
     'PayrollDeductions',
     'EmployeeTerminations',
     'BiometricImports',
+    'AttendanceDevices',
+    'AttendanceDeviceEvents',
     'PayrollReports',
     'Shareholders',
     'ShareholderDistributions',
@@ -3218,6 +3307,78 @@ export const waternetApi = createApi({
       transformResponse: (response: DataResponse<BiometricImportBatch>) => response.data,
       invalidatesTags: ['BiometricImports', 'Attendance', 'HrSummary', 'Payroll'],
     }),
+    getAttendanceDevices: builder.query<AttendanceDeviceOverview, void>({
+      query: () => '/attendance-devices',
+      transformResponse: (response: { data: AttendanceDevice[]; meta: AttendanceDeviceOverview['meta'] }) => ({ devices: response.data, meta: response.meta }),
+      providesTags: ['AttendanceDevices'],
+    }),
+    createAttendanceDevice: builder.mutation<AttendanceDevice, Record<string, unknown>>({
+      query: (body) => ({ url: '/attendance-devices', method: 'POST', body }),
+      transformResponse: (response: DataResponse<AttendanceDevice>) => response.data,
+      invalidatesTags: ['AttendanceDevices'],
+    }),
+    updateAttendanceDevice: builder.mutation<AttendanceDevice, { id: number; body: Record<string, unknown> }>({
+      query: ({ id, body }) => ({ url: `/attendance-devices/${id}`, method: 'PUT', body }),
+      transformResponse: (response: DataResponse<AttendanceDevice>) => response.data,
+      invalidatesTags: ['AttendanceDevices'],
+    }),
+    deleteAttendanceDevice: builder.mutation<{ message: string }, number>({
+      query: (id) => ({ url: `/attendance-devices/${id}`, method: 'DELETE' }),
+      invalidatesTags: ['AttendanceDevices', 'AttendanceDeviceEvents', 'BiometricImports'],
+    }),
+    testAttendanceDevice: builder.mutation<{ device: AttendanceDevice; details: Record<string, unknown> }, number>({
+      query: (id) => ({ url: `/attendance-devices/${id}/test`, method: 'POST' }),
+      transformResponse: (response: DataResponse<{ device: AttendanceDevice; details: Record<string, unknown> }>) => response.data,
+      invalidatesTags: ['AttendanceDevices'],
+    }),
+    syncAttendanceDevice: builder.mutation<AttendanceDeviceSyncResult, number>({
+      query: (id) => ({ url: `/attendance-devices/${id}/sync`, method: 'POST' }),
+      transformResponse: (response: DataResponse<AttendanceDeviceSyncResult>) => response.data,
+      invalidatesTags: ['AttendanceDevices', 'AttendanceDeviceEvents', 'BiometricImports', 'Attendance', 'HrSummary', 'Payroll'],
+    }),
+    simulateAttendanceDevice: builder.mutation<AttendanceDeviceSyncResult, { id: number; body: Record<string, unknown> }>({
+      query: ({ id, body }) => ({ url: `/attendance-devices/${id}/simulate`, method: 'POST', body }),
+      transformResponse: (response: DataResponse<AttendanceDeviceSyncResult>) => response.data,
+      invalidatesTags: ['AttendanceDevices', 'AttendanceDeviceEvents', 'BiometricImports', 'Attendance', 'HrSummary', 'Payroll'],
+    }),
+    importAttendanceDeviceFile: builder.mutation<AttendanceDeviceSyncResult, { id: number; body: FormData }>({
+      query: ({ id, body }) => ({ url: `/attendance-devices/${id}/import`, method: 'POST', body }),
+      transformResponse: (response: DataResponse<AttendanceDeviceSyncResult>) => response.data,
+      invalidatesTags: ['AttendanceDevices', 'AttendanceDeviceEvents', 'BiometricImports', 'Attendance', 'HrSummary', 'Payroll'],
+    }),
+    getAttendanceDeviceMappings: builder.query<AttendanceDeviceMapping[], number>({
+      query: (id) => `/attendance-devices/${id}/mappings`,
+      transformResponse: (response: DataResponse<AttendanceDeviceMapping[]>) => response.data,
+      providesTags: ['AttendanceDevices'],
+    }),
+    createAttendanceDeviceMapping: builder.mutation<{ mapping: AttendanceDeviceMapping; processed_events: number; remaining_conflicts: number }, { deviceId: number; body: Record<string, unknown> }>({
+      query: ({ deviceId, body }) => ({ url: `/attendance-devices/${deviceId}/mappings`, method: 'POST', body }),
+      transformResponse: (response: DataResponse<{ mapping: AttendanceDeviceMapping; processed_events: number; remaining_conflicts: number }>) => response.data,
+      invalidatesTags: ['AttendanceDevices', 'AttendanceDeviceEvents', 'Attendance', 'HrSummary', 'Payroll'],
+    }),
+    deleteAttendanceDeviceMapping: builder.mutation<{ message: string }, { deviceId: number; mappingId: number }>({
+      query: ({ deviceId, mappingId }) => ({ url: `/attendance-devices/${deviceId}/mappings/${mappingId}`, method: 'DELETE' }),
+      invalidatesTags: ['AttendanceDevices', 'AttendanceDeviceEvents'],
+    }),
+    getAttendanceDeviceEvents: builder.query<AttendanceDeviceEvent[], { device_id?: number; status?: string; from?: string; to?: string } | void>({
+      query: (params) => ({ url: '/attendance-device-events', params: params || undefined }),
+      transformResponse: (response: DataResponse<AttendanceDeviceEvent[]>) => response.data,
+      providesTags: ['AttendanceDeviceEvents'],
+    }),
+    resolveAttendanceDeviceEvent: builder.mutation<unknown, { id: number; employee_id: number }>({
+      query: ({ id, employee_id }) => ({ url: `/attendance-device-events/${id}/resolve`, method: 'POST', body: { employee_id } }),
+      invalidatesTags: ['AttendanceDevices', 'AttendanceDeviceEvents', 'Attendance', 'HrSummary', 'Payroll'],
+    }),
+    reprocessAttendanceDeviceEvent: builder.mutation<AttendanceDeviceEvent, number>({
+      query: (id) => ({ url: `/attendance-device-events/${id}/reprocess`, method: 'POST' }),
+      transformResponse: (response: DataResponse<AttendanceDeviceEvent>) => response.data,
+      invalidatesTags: ['AttendanceDevices', 'AttendanceDeviceEvents', 'Attendance', 'HrSummary', 'Payroll'],
+    }),
+    ignoreAttendanceDeviceEvent: builder.mutation<AttendanceDeviceEvent, number>({
+      query: (id) => ({ url: `/attendance-device-events/${id}/ignore`, method: 'POST' }),
+      transformResponse: (response: DataResponse<AttendanceDeviceEvent>) => response.data,
+      invalidatesTags: ['AttendanceDevices', 'AttendanceDeviceEvents'],
+    }),
     getPayrollRuns: builder.query<PayrollRun[], void>({
       query: () => '/payroll-runs',
       transformResponse: (response: DataResponse<PayrollRun[]>) => response.data,
@@ -3854,6 +4015,21 @@ export const {
   useCancelEmployeeTerminationMutation,
   useGetBiometricImportsQuery,
   useImportBiometricAttendanceMutation,
+  useGetAttendanceDevicesQuery,
+  useCreateAttendanceDeviceMutation,
+  useUpdateAttendanceDeviceMutation,
+  useDeleteAttendanceDeviceMutation,
+  useTestAttendanceDeviceMutation,
+  useSyncAttendanceDeviceMutation,
+  useSimulateAttendanceDeviceMutation,
+  useImportAttendanceDeviceFileMutation,
+  useGetAttendanceDeviceMappingsQuery,
+  useCreateAttendanceDeviceMappingMutation,
+  useDeleteAttendanceDeviceMappingMutation,
+  useGetAttendanceDeviceEventsQuery,
+  useResolveAttendanceDeviceEventMutation,
+  useReprocessAttendanceDeviceEventMutation,
+  useIgnoreAttendanceDeviceEventMutation,
   useGetPayrollRunsQuery,
   useGetPayrollEligibleEmployeesQuery,
   useCreatePayrollRunMutation,

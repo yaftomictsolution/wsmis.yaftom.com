@@ -17,7 +17,7 @@ class PermissionCatalogSeeder extends Seeder
         'suppliers', 'assets', 'asset-purchases', 'warehouses', 'inventory', 'goods',
         'employees', 'attendance', 'leave-requests', 'leave-policies', 'work-schedules',
         'salary-advances', 'employee-adjustments', 'performance-reviews',
-        'payroll', 'payroll-deductions', 'employee-terminations', 'biometric-imports',
+        'payroll', 'payroll-deductions', 'employee-terminations', 'biometric-imports', 'attendance-devices',
         'shareholders', 'reconciliation', 'financial-closing', 'financial-reports', 'reports',
     ];
 
@@ -32,7 +32,7 @@ class PermissionCatalogSeeder extends Seeder
             'asset-purchases', 'warehouses', 'inventory', 'goods', 'employees', 'attendance',
             'leave-requests', 'leave-policies', 'work-schedules', 'salary-advances',
             'employee-adjustments', 'performance-reviews', 'payroll', 'payroll-deductions',
-            'employee-terminations', 'biometric-imports', 'shareholders', 'reconciliation',
+            'employee-terminations', 'biometric-imports', 'attendance-devices', 'shareholders', 'reconciliation',
             'financial-closing', 'financial-reports', 'reports',
         ],
         'Accountant' => [
@@ -45,7 +45,7 @@ class PermissionCatalogSeeder extends Seeder
             'dashboard', 'users', 'service-areas', 'employees', 'attendance', 'leave-requests',
             'leave-policies', 'work-schedules', 'salary-advances', 'employee-adjustments',
             'performance-reviews', 'payroll', 'payroll-deductions', 'employee-terminations',
-            'biometric-imports', 'reports',
+            'biometric-imports', 'attendance-devices', 'reports',
         ],
         'Meter Reader' => [
             'dashboard', 'service-areas', 'customers', 'meters', 'meter-assignments',

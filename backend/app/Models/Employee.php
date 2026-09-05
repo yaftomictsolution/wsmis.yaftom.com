@@ -111,6 +111,16 @@ class Employee extends Model
         return $this->hasMany(AttendanceRecord::class);
     }
 
+    public function attendanceDeviceMappings(): HasMany
+    {
+        return $this->hasMany(AttendanceDeviceMapping::class);
+    }
+
+    public function attendanceDeviceEvents(): HasMany
+    {
+        return $this->hasMany(AttendanceDeviceEvent::class);
+    }
+
     public function leaveRequests(): HasMany
     {
         return $this->hasMany(LeaveRequest::class);

@@ -63,6 +63,7 @@ const permissionModuleLabels: Record<string, { en: string; fa: string }> = {
   'payroll-deductions': { en: 'Payroll Deductions', fa: 'کسورات معاش' },
   'employee-terminations': { en: 'Employee Terminations', fa: 'ختم وظیفه کارمندان' },
   'biometric-imports': { en: 'Biometric Imports', fa: 'واردکردن حاضری بایومتریک' },
+  'attendance-devices': { en: 'Electronic Attendance Devices', fa: 'دستگاه‌های حاضری الکترونیکی' },
   shareholders: { en: 'Shareholders', fa: 'سهم‌داران' },
   reconciliation: { en: 'Reconciliation', fa: 'تطبیق حسابات' },
   'financial-closing': { en: 'Financial Closing', fa: 'بستن حسابات مالی' },

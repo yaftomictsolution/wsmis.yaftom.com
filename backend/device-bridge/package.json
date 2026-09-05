@@ -1,0 +1,10 @@
+{
+  "name": "wsmis-attendance-device-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Read-only local connector for ZKTeco attendance terminals",
+  "license": "UNLICENSED",
+  "dependencies": {
+    "zk-attendance-sdk": "2.3.0"
+  }
+}

@@ -3,10 +3,15 @@
 function resolveApiBaseUrl() {
   const configuredUrl =
     process.env.NEXT_PUBLIC_API_URL ??
-    process.env.NEXT_PUBLIC_API_BASE_URL ??
-    'http://127.0.0.1:8000/api'
+    process.env.NEXT_PUBLIC_API_BASE_URL
 
-  const normalizedUrl = configuredUrl.replace(/\/+$/, '')
+  const isLocalBrowser =
+    typeof window !== 'undefined' &&
+    ['localhost', '127.0.0.1'].includes(window.location.hostname)
+
+  const baseUrl = configuredUrl ?? (isLocalBrowser ? '/api' : 'http://127.0.0.1:8000/api')
+
+  const normalizedUrl = baseUrl.replace(/\/+$/, '')
 
   return normalizedUrl.endsWith('/api') ? normalizedUrl : `${normalizedUrl}/api`
 }

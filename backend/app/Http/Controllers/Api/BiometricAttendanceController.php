@@ -27,7 +27,7 @@ class BiometricAttendanceController extends Controller
         $this->authorizeHrView($request);
 
         return response()->json(['data' => BiometricImportBatch::query()
-            ->with('importer:id,name')
+            ->with(['importer:id,name', 'device:id,name,code'])
             ->latest()
             ->limit(50)
             ->get()]);
@@ -61,7 +61,7 @@ class BiometricAttendanceController extends Controller
             throw $exception;
         }
 
-        return response()->json(['data' => $batch->fresh()->load('importer:id,name')], 201);
+        return response()->json(['data' => $batch->fresh()->load(['importer:id,name', 'device:id,name,code'])], 201);
     }
 
     public function template(Request $request): StreamedResponse
